@@ -1,0 +1,25 @@
+# --- wynik budowania ---
+build/
+out/
+*.dll
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.obj
+*.tlog
+
+# --- Visual Studio / CMake ---
+.vs/
+CMakeCache.txt
+CMakeFiles/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+
+# --- lokalne ---
+*.log
+lexara112.cfg
+__pycache__/
+*.pyc

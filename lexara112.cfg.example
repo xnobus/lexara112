@@ -1,0 +1,36 @@
+# Lexara 1.12 - przelaczniki latek. 0 = wylaczone, 1 = wlaczone.
+# Brak tego pliku = wszystko wlaczone.
+# Po kazdej zmianie wystarczy restart gry - BEZ przebudowy DLL-a.
+#
+# KROK 1 (teraz): wszystko wylaczone, LACZNIE z hakiem FT_New_Library.
+# tekst MUSI wrocic. Jesli nie wroci, winowajca nie jest w tej liscie.
+
+# --- dziesiec miejsc latania (wstawki asemblerowe w kodzie klienta) ---
+site_initbuf=1
+site_allocbuf=1
+site_checkgeom=1
+site_checkcall=1
+site_bufstream=1
+site_bufalloc1=1
+site_bufalloc2=1
+site_bufalloc3=1
+site_procbatch=1
+site_glyphy=1
+
+# --- haki na funkcjach czcionek klienta ---
+hook_renderbatch=1
+hook_renderglyph=1
+hook_getglyph=1
+hook_checkgeom=1
+hook_writegeom=1
+hook_initline=1
+
+# --- haki FreeType (podmiana biblioteki klienta na te z Lexary) ---
+ft_hooks=1
+
+# --- kompilacja i wiazanie wlasnych shaderow ---
+shaders=1
+
+# Renderer MSDF: 1 = wlaczony, 0 = klient rysuje po swojemu.
+# Przelacza tez CTRL+ALT+F11 w grze - zapis dziala od nastepnego uruchomienia.
+msdf_enabled=0
