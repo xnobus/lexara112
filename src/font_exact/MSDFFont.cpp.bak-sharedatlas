@@ -7,7 +7,7 @@
 #include <ranges>
 
 MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize)
-    : m_ftFace(face), m_msdfFont(nullptr), m_isValid(false)
+    : m_ftFace(face), m_msdfFont(nullptr), m_isValid(false), m_oldestPage(0), m_evictionCount(0)
 {
     if (!face) return;
 
@@ -27,13 +27,8 @@ MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize, FT_L
 }
 
 MSDFFont::~MSDFFont() {
-    // [1.12] Strony sa wspolne, wiec ich TU NIE zwalniamy - zabralibysmy je
-    // krojom, ktore dalej rysuja. Trzeba za to wymiesc z nich wpisy tego
-    // kroju, bo trzymaja `this` i eksmisja siegnelaby po martwy obiekt.
-    // Straznik na liczniku: kroj, ktory nic nie ulozyl (kazdy MSDFFont
-    // pregenu), nie dotyka stanu dzielonego w ogole.
-    if (m_atlasEntryCount) ForgetFontEntries(this);
     m_glyphPool.clear();
+    m_atlasPages.clear();
     m_cache.reset();
     if (m_msdfFont) {
         msdfgen::destroyFont(m_msdfFont);
@@ -63,77 +58,18 @@ void MSDFFont::Unregister(FT_Face face) {
 }
 
 void MSDFFont::ClearAllCache() {
-    // Wolane z D3D::RegisterOnDestroy - urzadzenie znika, wiec tekstury stron
-    // trzeba puscic, a wszystkie kroje straca swoje glify naraz.
     for (auto& handle : s_fontHandles | std::views::values) {
         if (handle) {
             handle->m_glyphPool.clear();
-            handle->m_atlasEntryCount = 0;
+            handle->m_atlasPages.clear();
+            handle->m_oldestPage = 0;
+            handle->m_evictionCount++;
         }
     }
-    s_atlasPages.clear();
-    s_oldestPage = 0;
-    ++s_evictionCount;
 }
 
 void MSDFFont::Shutdown() {
     s_fontHandles.clear();
-    s_atlasPages.clear();
-}
-
-// [1.12] Uniewaznienie zamiast usuniecia. m_glyphPool to mapa gesta
-// (unordered_dense) - erase przestawia w niej inne elementy, a UploadGlyphToAtlas
-// dostaje `GlyphMetrics&` z tej wlasnie mapy i trzyma ta referencje przez cala
-// eksmisje. Zerowanie UV nie rusza ukladu mapy, a GetGlyph i tak rozpoznaje
-// wpis o zerowym u1/v1 jako "nigdy nie wgrany" i wysyla go do atlasu ponownie -
-// ta sciezka ponowienia juz istnieje i jest przechodzona przy kazdym starcie
-// przed pierwsza klatka.
-void MSDFFont::InvalidateGlyph(uint32_t codepoint) {
-    auto it = m_glyphPool.find(codepoint);
-    if (it == m_glyphPool.end()) return;
-    it->second.u0 = 0.0f;
-    it->second.v0 = 0.0f;
-    it->second.u1 = 0.0f;
-    it->second.v1 = 0.0f;
-    it->second.atlasPageIndex = 0;
-}
-
-void MSDFFont::ForgetFontEntries(MSDFFont* font) {
-    for (auto& page : s_atlasPages) {
-        if (!page) continue;
-        std::erase_if(page->entries, [font](const auto& e) { return e.first == font; });
-    }
-}
-
-// [1.12] Czysci najstarsza strone i uniewaznia WSZYSTKIE lezace na niej glify,
-// niezaleznie od tego, czyje sa. Licznik eksmisji jest globalny, wiec
-// CheckGeometryHk przebuduje geometrie kazdego napisu, nie tylko tego kroju,
-// ktory akurat wywolal eksmisje - i o to chodzi, bo strona miesza kroje.
-int MSDFFont::EvictOldestPage() {
-    if (s_atlasPages.empty()) return -1;
-    if (s_oldestPage >= s_atlasPages.size()) s_oldestPage = 0;
-
-    AtlasPage* page = s_atlasPages[s_oldestPage].get();
-    for (const auto& [owner, cp] : page->entries) {
-        if (owner) {
-            owner->InvalidateGlyph(cp);
-            if (owner->m_atlasEntryCount) --owner->m_atlasEntryCount;
-        }
-    }
-    page->Clear();
-
-    if (page->texture) {
-        D3DLOCKED_RECT fullRect;
-        if (SUCCEEDED(page->texture->LockRect(0, &fullRect, nullptr, 0))) {
-            memset(fullRect.pBits, 0, MSDF::ATLAS_SIZE * fullRect.Pitch);
-            page->texture->UnlockRect(0);
-        }
-    }
-
-    ++s_evictionCount;
-    const int cleared = s_oldestPage;
-    s_oldestPage = static_cast<uint16_t>((s_oldestPage + 1) % s_atlasPages.size());
-    return cleared;
 }
 
 // [1.12] Liczniki wyjsc z GetGlyph. Poprzednia sonda miala straznik
@@ -260,9 +196,9 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
     return &metrics;
 }
 
-MSDFFont::AtlasPage* MSDFFont::GetAtlasPage(size_t index) {
-    if (index < s_atlasPages.size()) {
-        return s_atlasPages[index].get();
+MSDFFont::AtlasPage* MSDFFont::GetAtlasPage(size_t index) const {
+    if (index < m_atlasPages.size()) {
+        return m_atlasPages[index].get();
     }
     return nullptr;
 }
@@ -280,12 +216,12 @@ bool MSDFFont::CreateAtlasPage() {
         // zapelnia, a kolejna nie powstaje.
         Log("[MSDF] CreateAtlasPage: CreateTexture %ux%u ODMOWIL (stron dotad=%u, max=%u)",
             MSDF::ATLAS_SIZE, MSDF::ATLAS_SIZE,
-            (unsigned)s_atlasPages.size(), (unsigned)MSDF::MAX_ATLAS_PAGES);
+            (unsigned)m_atlasPages.size(), (unsigned)MSDF::MAX_ATLAS_PAGES);
         return false;
     }
-    Log("[MSDF] CreateAtlasPage: strona %u utworzona (tekstura=%p, atlas wspolny)",
-        (unsigned)s_atlasPages.size(), (void*)page->texture);
-    s_atlasPages.push_back(std::move(page));
+    Log("[MSDF] CreateAtlasPage: strona %u utworzona (tekstura=%p)",
+        (unsigned)m_atlasPages.size(), (void*)page->texture);
+    m_atlasPages.push_back(std::move(page));
     return true;
 }
 
@@ -311,8 +247,8 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
     int16_t pageIndex = -1;
     AtlasPage* targetPage = nullptr;
 
-    for (size_t i = 0; i < s_atlasPages.size(); ++i) {
-        AtlasPage* page = s_atlasPages[i].get();
+    for (size_t i = 0; i < m_atlasPages.size(); ++i) {
+        AtlasPage* page = m_atlasPages[i].get();
         if (page->nextX + metrics.width + MSDF::ATLAS_GUTTER <= MSDF::ATLAS_SIZE &&
             page->nextY + metrics.height + MSDF::ATLAS_GUTTER <= MSDF::ATLAS_SIZE) {
             pageIndex = static_cast<int16_t>(i);
@@ -330,20 +266,30 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
         }
     }
     if (pageIndex == -1) {
-        // [1.12] Najpierw proba dolozenia strony, dopiero potem eksmisja -
-        // i eksmisja jest teraz TAKZE odpowiedzia na odmowe CreateTexture,
-        // nie tylko na osiagniecie MAX_ATLAS_PAGES. Wczesniej odmowa
-        // alokacji konczyla sie zwroceniem false, czyli glif przepadal na
-        // dobre; skoro strony sa juz wspolne, mamy czym sie podzielic.
-        if (s_atlasPages.size() < MSDF::MAX_ATLAS_PAGES && CreateAtlasPage()) {
-            pageIndex = static_cast<int16_t>(s_atlasPages.size() - 1);
-            targetPage = s_atlasPages.back().get();
+        if (m_atlasPages.size() >= MSDF::MAX_ATLAS_PAGES) {
+            pageIndex = m_oldestPage;
+            targetPage = m_atlasPages[m_oldestPage].get();
+
+            for (uint32_t cp : targetPage->codepoints) {
+                auto it = m_glyphPool.find(cp);
+                if (it != m_glyphPool.end()) {
+                    m_glyphPool.erase(it);
+                }
+            }
+            targetPage->Clear();
+
+            D3DLOCKED_RECT fullRect;
+            if (SUCCEEDED(targetPage->texture->LockRect(0, &fullRect, nullptr, 0))) {
+                memset(fullRect.pBits, 0, MSDF::ATLAS_SIZE * fullRect.Pitch);
+                targetPage->texture->UnlockRect(0);
+            }
+            m_evictionCount++;
+            m_oldestPage = (m_oldestPage + 1) % MSDF::MAX_ATLAS_PAGES;
         }
         else {
-            const int cleared = EvictOldestPage();
-            if (cleared < 0) { ++gNullUploadGen; return false; }
-            pageIndex = static_cast<int16_t>(cleared);
-            targetPage = s_atlasPages[cleared].get();
+            if (!CreateAtlasPage()) { ++gNullUploadGen; return false; }
+            pageIndex = static_cast<int16_t>(m_atlasPages.size() - 1);
+            targetPage = m_atlasPages.back().get();
         }
     }
     // [1.12] Sondy na KAZDEJ sciezce porazki - bez nich "upload sie nie udal"
@@ -388,8 +334,7 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
 
     targetPage->nextX += metrics.width + MSDF::ATLAS_GUTTER;
     targetPage->rowHeight = std::max(targetPage->rowHeight, static_cast<int>(metrics.height));
-    targetPage->entries.emplace_back(this, codepoint);
-    ++m_atlasEntryCount;
+    targetPage->codepoints.push_back(codepoint);
 
     return true;
 }
