@@ -102,9 +102,55 @@ migocze przy przebudowie geometrii), nastepna dzwignia to **`SDF_RENDER_SIZE`
 96 -> 64**: powierzchnia glifu spada wtedy ok. 2,2x, czyli pojemnosc atlasu
 rosnie do ~3600 glifow. Kosztem jest ostrosc bardzo duzego tekstu.
 
+## Regresja, ktora ta zmiana wywolala - i jej naprawa (22:59)
+
+Pierwsza wersja wspolnego atlasu zabila klienta po 45 minutach:
+`Errors\2026-09-09 22.59.20 Crash.txt`, `ACCESS_VIOLATION` **w calosci wewnatrz
+lexara112.dll** (baza `0x68DD0000`, szczyt `+0x95D8E`, ramka nizej `+0x1AEEA`).
+Rejestry nazywaja miejsce jednoznacznie: `ECX=EDX=0x180`, `EAX=ESI+0x180`,
+`ESI` niezmapowane. `0x180` = 384 = `metrics.width * 4` przy `width = 96`,
+czyli **petla wierszy w `UploadGlyphToAtlas`** - `memcpy` czytal zwolniona
+pamiec.
+
+### Przyczyna
+
+`GlyphMetrics::pixelData` jest wazne **tylko do konca biezacego wywolania**.
+Wskazuje albo w bufor `storage`, ktory zaraz po uploadzie idzie do
+`MSDFCache::StoreGlyph` i ginie przy najblizszym `FlushPendingWrites`
+(`m_pendingWrites` czysci sie po `WRITE_BATCH_SIZE` wpisach), albo - na sciezce
+`TryLoadGlyph` - w blok pliku cache zmapowany przez `MSDFManager`
+(`outMetrics.pixelData = blockPtr->payload + ge.dataOffset`), ktory tez potrafi
+zniknac.
+
+Sciezka ponowienia uploadu (`neverUploaded`, czyli `u1 == 0 && v1 == 0`)
+istniala wczesniej, ale odpalala sie **tylko przy starcie**, dla glifow
+dotknietych zanim pojawilo sie urzadzenie D3D - a wtedy `pixelData` bylo
+swieze, bo od jego ustawienia minelo kilka instrukcji. Wspolny atlas skierowal
+w to samo miejsce **eksmisje**: uniewazniony glif wracal tedy po minutach,
+z dawno martwym wskaznikiem.
+
+To nie jest usterka odziedziczona - to skutek uboczny tej zmiany. Stara,
+per-kroj eksmisja **usuwala** wpis z `m_glyphPool`, wiec glif zawsze wracal
+pelna sciezka (cache -> generacja) i nigdy nie czytal starego wskaznika.
+
+### Naprawa
+
+Dwa pociagniecia, obie w `MSDFFont.cpp`:
+
+1. Udany `UploadGlyphToAtlas` **zeruje `metrics.pixelData`**. Piksele sa juz
+   w atlasie, a wskaznik i tak nie przezyje - stale odczytanie staje sie
+   niemozliwe z konstrukcji, zamiast zalezec od tego, kto pamieta o cyklu zycia.
+2. Sciezka ponowienia sprawdza `pixelData`. NULL znaczy "wez piksele od nowa":
+   kasujemy wpis z puli i wchodzimy w pelna sciezke przez `GetGlyph`. Kasowanie
+   jest tu bezpieczne mimo gestej mapy, bo zadna referencja do puli nie jest
+   jeszcze w rekach - ani naszych, ani wolajacego.
+
+Rekurencja siega jednego poziomu: po `erase` wpisu nie ma, wiec wywolanie idzie
+przez `try_emplace` i konczy sie na `TryLoadGlyph` albo generacji.
+
 ## Sprawdzenie
 
-Zbudowane 2026-09-09 22:14 (`build.bat` wymaga cmake; tu poszlo bezposrednio
+Zbudowane 2026-09-09 22:14, poprawka pixelData 23:02 (`build.bat` wymaga cmake; tu poszlo bezposrednio
 MSBuild-em na wygenerowanym `build\lexara112.vcxproj`, bo w systemie nie ma
 cmake w PATH). W grze **niesprawdzone** - do potwierdzenia potrzeba sesji,
 w ktorej narysuje sie kilkanascie roznych krojow.

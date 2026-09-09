@@ -171,27 +171,6 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
         GlyphMetrics& cached = pit->second;
         const bool neverUploaded = (cached.u1 == 0.0f && cached.v1 == 0.0f);
         if (neverUploaded && cached.width > 0 && cached.height > 0) {
-            // [1.12] pixelData jest WAZNE TYLKO DO KONCA BIEZACEGO WYWOLANIA.
-            // Wskazuje albo w bufor `storage`, ktory zaraz po uploadzie idzie
-            // do MSDFCache::StoreGlyph i ginie przy najblizszym
-            // FlushPendingWrites, albo w blok pliku cache zmapowany przez
-            // MSDFManager, ktory tez potrafi zniknac. Dlatego udany upload
-            // zeruje ten wskaznik (patrz koniec UploadGlyphToAtlas), a tutaj
-            // NULL znaczy "trzeba wziac piksele od nowa".
-            //
-            // Bez tego eksmisja ze wspolnego atlasu byla wyrokiem: uniewazniony
-            // glif wracal tedy i memcpy w petli wierszy czytalo zwolniona
-            // pamiec. Crash 2026-09-09 22:59 (`ECX=EDX=0x180` = width*4 przy
-            // width=96, zrodlo `ESI` niezmapowane) - regresja po wprowadzeniu
-            // wspolnego atlasu.
-            //
-            // Kasujemy wpis i wchodzimy w pelna sciezke (cache -> generacja).
-            // To bezpieczne mimo gestej mapy: zadna referencja do puli nie jest
-            // jeszcze w rekach ani naszych, ani wolajacego.
-            if (!cached.pixelData) {
-                m_glyphPool.erase(pit);
-                return GetGlyph(codepoint);
-            }
             if (!UploadGlyphToAtlas(cached, codepoint)) { ++gNullRetry; return nullptr; }
         }
         ++gOkPool;
@@ -411,12 +390,6 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
     targetPage->rowHeight = std::max(targetPage->rowHeight, static_cast<int>(metrics.height));
     targetPage->entries.emplace_back(this, codepoint);
     ++m_atlasEntryCount;
-
-    // [1.12] Piksele sa juz w atlasie, a ten wskaznik przezyje najwyzej do
-    // najblizszego zrzutu cache'u. Zerujemy go, zeby stale odczytanie bylo
-    // niemozliwe z konstrukcji - GetGlyph rozpoznaje NULL i bierze piksele
-    // od nowa, zamiast czytac zwolniona pamiec.
-    metrics.pixelData = nullptr;
 
     return true;
 }
