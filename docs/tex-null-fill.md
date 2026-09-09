@@ -112,7 +112,7 @@ Nieudane ladowanie tekstury konczy sie brakiem grafiki zamiast smiercia procesu.
 **To naprawa obslugi bledu, nie przyczyny** - sciezka do nieistniejacego pliku
 dalej jest bledem po stronie addona.
 
-## Sprawdzenie
+## Sprawdzenie - POTWIERDZONE W GRZE 2026-09-09
 
 W logu `lexara112.log` przy starcie:
 
@@ -120,13 +120,24 @@ W logu `lexara112.log` przy starcie:
 [MSDF] site_texnullfill: latka na crash 0x00448955 zalozona
 ```
 
-`commit = 0` z Detours znaczy tylko "brak bledu", NIE "hak dziala". Dowodem jest
-dopiero sonda w grze - bez latki wywala klienta, z latka rysuje pusto
-(miesci sie w limicie 255 znakow pola czatu 1.12):
+`commit = 0` z Detours znaczy tylko "brak bledu", NIE "hak dziala", a sam log
+mowi tylko tyle, ze latka sie zalozyla. Rozstrzyga dopiero test z kontrola:
 
-```
-/run local f=CreateFrame("Frame",nil,UIParent) f:SetWidth(64) f:SetHeight(64) f:SetPoint("CENTER") local t=f:CreateTexture() t:SetAllPoints() t:SetTexture("Interface\\AddOns\\Nic\\Takiego\\Nie\\Ma")
-```
+| `site_texnullfill` | wynik |
+|---|---|
+| `0` | crash `0x00448955`, rejestry identyczne jak w sesjach 19:33 i 19:41 (`Errors\2026-09-09 20.31.18 Crash.txt`) |
+| `1` | brak crasha, ta sama akcja |
+
+**Sonda `/run` z `SetTexture` na martwa sciezke NIE reprodukuje tego crasha** -
+sprawdzone, klient przezywa nawet przy wylaczonej latce. Reprodukcja wymaga
+sciezki zapisanej w bazie addona i przemalowania wiersza, ktory ja rysuje:
+w WeakestAuras jest to `groupIcon` grupy i **zwiniecie tej grupy** w liscie aur
+(`Regions.lua`, `groupModifyThumbnail`). Szczegoly: `_wiedza\weakauras.md`
+w katalogu gry.
+
+Wniosek metodyczny: sonda bez kontroli o znanym wyniku nie jest sonda. Pierwsza
+wersja tej sondy nie crashowala klienta i wygladalo to na dzialajaca latke,
+a byl to po prostu kod, ktory nie dotyka lataneho miejsca.
 
 ## Wylaczenie
 
