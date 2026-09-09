@@ -36,10 +36,13 @@
 //   0044895E  mov edi, [ebp-4]        ; <-- powrot, gdy edi == 0
 //   00448961  ...                     ; przejscie do nastepnego poziomu
 //
-// Latka sprawdza `edi` i przy NULL przeskakuje OBA zapisy naraz - drugi
-// (`rep stosb` pod 0044895C) wywalilby sie tak samo, wiec powrot idzie wtedy
-// od razu na 0044895E. Nie da sie tego zrobic jednym adresem powrotu, stad
-// dwa jmpbacki zamiast jednego.
+// Latka sprawdza `edi` i przy wskazniku nie do zapisu przeskakuje OBA zapisy
+// naraz - drugi (`rep stosb` pod 0044895C) wywalilby sie tak samo, wiec powrot
+// idzie wtedy od razu na 0044895E. Nie da sie tego zrobic jednym adresem
+// powrotu, stad dwa jmpbacki zamiast jednego.
+//
+// "Nie do zapisu" to zakres, nie samo zero: 2026-09-09 wpis okazal sie raz
+// NULL-em, a raz 0xFFFFFFFF - szczegoly przy samym stubie nizej.
 //
 // Pominiecie poziomu jest bezpieczne: petla i tak przelicza od nowa ecx
 // (0x448945) i ebx, a edi bierze ponownie z [ebp-4] (0x44895E). Zaden stan nie
@@ -57,11 +60,24 @@ namespace {
     constexpr uintptr_t CGxTexture__FillMissing_jmpback_fill = 0x00448957;
     constexpr uintptr_t CGxTexture__FillMissing_jmpback_skip = 0x0044895E;
 
+    // Zakres, nie samo zero. Pierwsza wersja sprawdzala `test edi,edi` i to
+    // wystarczylo dokladnie do 2026-09-09 21:39, kiedy klient wywalil sie
+    // wewnatrz TEGO stuba (Errors\2026-09-09 21.39.32 Crash.txt): rejestry
+    // identyczne jak zawsze na tej sciezce, ale EDI=FFFFFFFF zamiast 0, wiec
+    // straznik przepuscil i `rep stosd` poszlo pod 0xFFFFFFFF. Wpis w tablicy
+    // zastepczej bywa wiec nie tylko NULL-em, ale i sentinelem -1.
+    //
+    // Dolna granica 0x10000 to pierwsza strona procesu, ktora na Windows nigdy
+    // nie jest zmapowana; gorna 0x7FFFFFFF odcina -1 i polowe jadra. Obie to
+    // `cmp`, czyli ruszaja wylacznie EFLAGS - kod pod 00448957 czyta ecx i ebx,
+    // nie flagi po `or`, wiec zywe rejestry zostaja nietkniete.
     __declspec(naked) void CGxTexture__FillMissing_siteHk() {
         __asm {
             or   eax, 0FFFFFFFFh;
-            test edi, edi;
-            jz   no_buffer;
+            cmp  edi, 10000h;
+            jb   no_buffer;
+            cmp  edi, 7FFFFFFFh;
+            ja   no_buffer;
             rep  stosd;
             jmp  CGxTexture__FillMissing_jmpback_fill;
         no_buffer:

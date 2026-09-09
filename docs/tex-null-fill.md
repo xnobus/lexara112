@@ -87,13 +87,27 @@ z obu stron.
 
 ```asm
 or   eax, 0FFFFFFFFh
-test edi, edi
-jz   no_buffer
+cmp  edi, 10000h
+jb   no_buffer         ; NULL i smieci z pierwszej strony procesu
+cmp  edi, 7FFFFFFFh
+ja   no_buffer         ; -1 i adresy jadra
 rep  stosd
 jmp  00448957          ; normalna droga - reszta oryginalu dokancza stosb
 no_buffer:
 jmp  0044895E          ; pomija OBA zapisy
 ```
+
+**Straznik sprawdza zakres, nie samo zero - i to jest poprawka z 2026-09-09
+21:50.** Pierwsza wersja miala `test edi,edi / jz` i przezyla dokladnie jedna
+sesje: `Errors\2026-09-09 21.39.32 Crash.txt` to crash WEWNATRZ tego stuba.
+Rejestry jak zawsze na tej sciezce (`EAX=FFFFFFFF EBX=8 ECX=2 EDX=1 ESI=2`),
+ale `EDI=FFFFFFFF` zamiast `0`, adres feralnego dostepu rowny `EDI`, EIP w
+`lexara112.dll`, a ramka nizej to `0044A2F0`, czyli powrot z `call 00448920`.
+Wpis w tablicy zastepczej bywa wiec nie tylko NULL-em, ale i sentinelem `-1`;
+zalozenie "wpisy sa NULL" w sekcji Przyczyna jest niepelne.
+
+Obie granice to `cmp`, czyli ruszaja wylacznie EFLAGS. Kod pod `00448957`
+czyta `ecx` i `ebx`, nie flagi po `or`, wiec zywe rejestry zostaja nietkniete.
 
 **Dwa adresy powrotu, nie jeden.** Drugi zapis (`rep stosb` pod `0044895C`)
 wywalilby sie tak samo, wiec przy NULL trzeba przeskoczyc od razu na `0044895E`.
