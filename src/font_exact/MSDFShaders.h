@@ -1,8 +1,8 @@
 #pragma once
 
 inline auto* vertexShaderHLSL = R"(
-	uniform float4x4 WorldViewProj;
-	float4 control : register(c23); // font size, outline mode, spread, atlas size
+	uniform float4x4 WorldViewProj : register(c240);
+	float4 control : register(c220); // font size, outline mode, spread, atlas size
 
 	struct VS_IN {
 		float4 pos  : POSITION0;
@@ -41,7 +41,7 @@ inline auto* vertexShaderHLSL = R"(
 // od "pusty atlas". Wlaczany flaga MSDF_DEBUG_SOLID w MSDF.cpp.
 inline auto* pixelShaderDebugHLSL = R"(
 	sampler2D gameTexture : register(s0);
-	float4 control : register(c23);
+	float4 control : register(c220);
 
 	struct PS_IN {
 		float4 col : COLOR0;
@@ -63,7 +63,7 @@ inline auto* pixelShaderHLSL = R"(
 	sampler2D sdfAtlas2   : register(s14);
 	sampler2D sdfAtlas3   : register(s15);
 
-	float4 control : register(c23); // font size, outline mode, spread, atlas size
+	float4 control : register(c220); // font size, outline mode, spread, atlas size
 
 	struct PS_IN {
 		float4 col : COLOR0;

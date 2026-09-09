@@ -322,7 +322,8 @@ namespace D3D {
                                 oReset = reinterpret_cast<Reset_t>(vtbl->Reset);
                                 Hooks::Detour(&oReset, hkReset);
                             }
-                            DetourTransactionCommit();
+                            const LONG st = DetourTransactionCommit();
+                            Log("[MSDF] haki urzadzenia: commit=%ld", st);
                         }
                     }
                     __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -350,6 +351,10 @@ namespace D3D {
         using LoadLibraryExW_t = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
 
         Direct3DCreate9_t oDirect3DCreate9 = nullptr;
+
+        using Direct3DCreate9Ex_t = HRESULT(WINAPI*)(UINT, IDirect3D9Ex**);
+        Direct3DCreate9Ex_t oDirect3DCreate9Ex = nullptr;
+        HRESULT WINAPI hkDirect3DCreate9Ex(UINT sdkVersion, IDirect3D9Ex** ppD3D);
         CreateDevice_t oCreateDevice = nullptr;
         LoadLibraryA_t oLoadLibraryA = nullptr;
         LoadLibraryW_t oLoadLibraryW = nullptr;
@@ -360,12 +365,30 @@ namespace D3D {
                                                              DWORD, D3DPRESENT_PARAMETERS*, void*, IDirect3DDevice9**);
         CreateDeviceEx_t oCreateDeviceEx = nullptr;
 
+        // [1.12] Definicja nizej. Deklaracja tutaj, bo hkDirect3DCreate9 wola to
+        // od razu po podmianie wpisow vtable - patrz komentarz w miejscu wywolania.
+        void CaptureDeviceViaSharedVtable(IDirect3D9* provided = nullptr);
+
+        // [1.12] Podniesiona na czas tworzenia NASZEGO urzadzenia zastepczego
+        // 8x8, tego od zdobycia wspoldzielonej vtable.
+        //
+        // Bez tej blokady wychodzila kaskada: vtbl[16] jest juz podmieniony, wiec
+        // nasze wlasne CreateDevice wpada w hkCreateDevice, ten wola
+        // InstallDeviceHooks i zapamietuje jako g_device urzadzenie zastepcze -
+        // ktore chwile pozniej zwalniamy. Od tego momentu g_device wskazuje na
+        // zwolniony obiekt, a hkEndSceneShared nie podmienia go na urzadzenie
+        // klienta, bo widzi warunek (device && !g_device) jako falszywy.
+        // Log takiego przebiegu: "hkCreateDevice dev=0A041D00" i zaraz
+        // "urzadzenie przechwycone: 0A041D00" z tym samym adresem, po czym cisza.
+        bool g_tworzymyZastepcze = false;
+
         HRESULT STDMETHODCALLTYPE hkCreateDeviceEx(IDirect3D9* pThis, UINT adapter, D3DDEVTYPE type,
                                                    HWND hFocus, DWORD flags, D3DPRESENT_PARAMETERS* pPP,
                                                    void* pFullscreenMode, IDirect3DDevice9** ppDevice) {
             const HRESULT hr = oCreateDeviceEx(pThis, adapter, type, hFocus, flags, pPP, pFullscreenMode, ppDevice);
-            Log("[MSDF] hkCreateDeviceEx: hr=0x%08lX dev=%p", hr, (ppDevice ? *ppDevice : nullptr));
-            if (SUCCEEDED(hr) && ppDevice && *ppDevice) {
+            Log("[MSDF] hkCreateDeviceEx: hr=0x%08lX dev=%p%s", hr, (ppDevice ? *ppDevice : nullptr),
+                g_tworzymyZastepcze ? " (nasze zastepcze - pomijamy)" : "");
+            if (!g_tworzymyZastepcze && SUCCEEDED(hr) && ppDevice && *ppDevice) {
                 InstallDeviceHooks(*ppDevice);
             }
             return hr;
@@ -375,16 +398,25 @@ namespace D3D {
                                                  HWND hFocus, DWORD flags,
                                                  D3DPRESENT_PARAMETERS* pPP, IDirect3DDevice9** ppDevice) {
             const HRESULT hr = oCreateDevice(pThis, adapter, type, hFocus, flags, pPP, ppDevice);
-            Log("[MSDF] hkCreateDevice: hr=0x%08lX dev=%p", hr, (ppDevice ? *ppDevice : nullptr));
-            if (SUCCEEDED(hr) && ppDevice && *ppDevice) {
+            Log("[MSDF] hkCreateDevice: hr=0x%08lX dev=%p%s", hr, (ppDevice ? *ppDevice : nullptr),
+                g_tworzymyZastepcze ? " (nasze zastepcze - pomijamy)" : "");
+            if (!g_tworzymyZastepcze && SUCCEEDED(hr) && ppDevice && *ppDevice) {
                 InstallDeviceHooks(*ppDevice);
             }
             return hr;
         }
 
-        IDirect3D9* WINAPI hkDirect3DCreate9(UINT sdkVersion) {
-            IDirect3D9* d3d = oDirect3DCreate9(sdkVersion);
-            Log("[MSDF] hkDirect3DCreate9: sdk=%u -> d3d=%p", sdkVersion, d3d);
+        // [1.12] Zapamietane po to, zeby dalo sie pozniej sprawdzic, czy nasz wpis
+        // jeszcze tam stoi. hkCreateDevice nie odpalil sie dla urzadzenia klienta
+        // ANI RAZU, a moduly z dlls.txt (SuperWoWhook, VfPatcher, no1600x1200)
+        // takze hakuja D3D - jesli ktorys nadpisal slot 16 PO nas i zapamietal
+        // oryginal, jestesmy trwale ominieci i to tlumaczy wszystko.
+        void** g_ifaceVtbl = nullptr;
+        void*  g_naszCreateDevice = nullptr;
+
+        void PatchInterfaceVtable(void* d3dRaw, const char* skad) {
+            IDirect3D9* d3d = reinterpret_cast<IDirect3D9*>(d3dRaw);
+            Log("[MSDF] %s -> d3d=%p", skad, d3d);
             if (d3d && !oCreateDevice) {
                 __try {
                     // CreateDevice to slot 16 vtable IDirect3D9.
@@ -403,6 +435,8 @@ namespace D3D {
                         vtbl[16] = reinterpret_cast<void*>(&hkCreateDevice);
                         DWORD tmp = 0;
                         VirtualProtect(&vtbl[16], sizeof(void*), oldProt, &tmp);
+                        g_ifaceVtbl = vtbl;
+                        g_naszCreateDevice = vtbl[16];
                         Log("[MSDF] vtbl[16] podmieniony: %p -> %p",
                             reinterpret_cast<void*>(oCreateDevice), vtbl[16]);
                     }
@@ -410,31 +444,156 @@ namespace D3D {
                     // [1.12] Slot 20 to IDirect3D9Ex::CreateDeviceEx. Klient 1.12
                     // sam by go nie wolal, ale ktorys z modow (SuperWoWhook,
                     // VanillaUtils) moze podnosic urzadzenie do D3D9Ex.
-                    DWORD oldProtEx = 0;
-                    if (VirtualProtect(&vtbl[20], sizeof(void*), PAGE_READWRITE, &oldProtEx)) {
-                        oCreateDeviceEx = reinterpret_cast<CreateDeviceEx_t>(vtbl[20]);
-                        vtbl[20] = reinterpret_cast<void*>(&hkCreateDeviceEx);
-                        DWORD tmpEx = 0;
-                        VirtualProtect(&vtbl[20], sizeof(void*), oldProtEx, &tmpEx);
-                        Log("[MSDF] vtbl[20] (CreateDeviceEx) podmieniony: %p -> %p",
-                            reinterpret_cast<void*>(oCreateDeviceEx), vtbl[20]);
+                    //
+                    // UWAGA: ten slot ISTNIEJE tylko wtedy, gdy obiekt naprawde
+                    // implementuje IDirect3D9Ex. DXVK zwraca z Direct3DCreate9
+                    // obiekt Ex, wiec tam bylo bezpiecznie - ale d3d9.dll
+                    // z Windows zwraca zwykly IDirect3D9, ktorego tablica konczy
+                    // sie na slocie 16. Zapis pod vtbl[20] byl tam zapisem POZA
+                    // tablice, czyli po cudzych danych w .rdata. Dlatego pytamy
+                    // obiekt, zanim cokolwiek tkniemy.
+                    IDirect3D9Ex* ex = nullptr;
+                    const bool maEx = SUCCEEDED(d3d->QueryInterface(__uuidof(IDirect3D9Ex),
+                                                                    reinterpret_cast<void**>(&ex))) && ex;
+                    if (ex) ex->Release();
+
+                    if (!maEx) {
+                        Log("[MSDF] interfejs nie jest IDirect3D9Ex - slotu 20 NIE ruszam"
+                            " (tak jest na d3d9 z Windows, bez DXVK)");
                     } else {
-                        Log("[MSDF] VirtualProtect na vtbl[16] ODMOWIL (blad %lu)", GetLastError());
+                        DWORD oldProtEx = 0;
+                        if (VirtualProtect(&vtbl[20], sizeof(void*), PAGE_READWRITE, &oldProtEx)) {
+                            oCreateDeviceEx = reinterpret_cast<CreateDeviceEx_t>(vtbl[20]);
+                            vtbl[20] = reinterpret_cast<void*>(&hkCreateDeviceEx);
+                            DWORD tmpEx = 0;
+                            VirtualProtect(&vtbl[20], sizeof(void*), oldProtEx, &tmpEx);
+                            Log("[MSDF] vtbl[20] (CreateDeviceEx) podmieniony: %p -> %p",
+                                reinterpret_cast<void*>(oCreateDeviceEx), vtbl[20]);
+                        } else {
+                            Log("[MSDF] VirtualProtect na vtbl[20] ODMOWIL (blad %lu)", GetLastError());
+                        }
                     }
                 }
                 __except (EXCEPTION_EXECUTE_HANDLER) { oCreateDevice = nullptr; }
             }
+        }
+
+        // [1.12] Odzyskanie wpisu, gdy ktos zahakowal po nas. Cudzy wpis staje sie
+        // naszym "oryginalem", wiec lancuch zostaje zachowany i jego hak dalej
+        // dziala - wchodzimy tylko przed niego. Wolane cyklicznie, bo nie wiadomo,
+        // ktory mod zaklada swoje haki i kiedy.
+        void ReassertInterfaceHook() {
+            if (!g_ifaceVtbl || !g_naszCreateDevice) return;
+            __try {
+                void* teraz = g_ifaceVtbl[16];
+                if (teraz == g_naszCreateDevice) return;
+
+                DWORD oldProt = 0;
+                if (VirtualProtect(&g_ifaceVtbl[16], sizeof(void*), PAGE_READWRITE, &oldProt)) {
+                    oCreateDevice = reinterpret_cast<CreateDevice_t>(teraz);
+                    g_ifaceVtbl[16] = g_naszCreateDevice;
+                    DWORD t = 0;
+                    VirtualProtect(&g_ifaceVtbl[16], sizeof(void*), oldProt, &t);
+                    Log("[MSDF] vtbl[16] ODZYSKANY: cudzy wpis %p staje sie naszym oryginalem", teraz);
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+
+        // [1.12] Straz nad wpisem vtbl[16]. Ktos przywraca pierwotny wpis DXVK
+        // zaraz po naszej podmianie, a klient tworzy urzadzenie w tej dziurze -
+        // bez tego hkCreateDevice nie odpalal sie dla niego ANI RAZU.
+        //
+        // Watek konczy sie, gdy tylko urzadzenie jest zlapane. To wazne: wczesniej
+        // ta robota wisiala w watku sondy, ktory po zlapaniu chodzil dalej przez
+        // dwie minuty i co pol sekundy wolal TestCooperativeLevel z OBCEGO watku,
+        // biorac blokade urzadzenia DXVK pod nosem watku rysujacego. Stad byl
+        // odczuwalny lag zaraz po wlaczeniu gry.
+        DWORD WINAPI VtableGuardThread(LPVOID) {
+            for (int i = 0; i < 4000 && !g_device; ++i) {
+                ReassertInterfaceHook();
+                Sleep(1);
+            }
+            Log(g_device ? "[MSDF] straz vtbl[16]: urzadzenie zlapane, watek konczy"
+                         : "[MSDF] straz vtbl[16]: urzadzenie sie nie pojawilo, watek konczy");
+            return 0;
+        }
+
+        void StartVtableGuard() {
+            static bool started = false;
+            if (started) return;
+            started = true;
+            if (HANDLE h = CreateThread(nullptr, 0, VtableGuardThread, nullptr, 0, nullptr)) CloseHandle(h);
+        }
+
+        IDirect3D9* WINAPI hkDirect3DCreate9(UINT sdkVersion) {
+            IDirect3D9* d3d = oDirect3DCreate9(sdkVersion);
+            PatchInterfaceVtable(d3d, "hkDirect3DCreate9");
+            if (d3d) StartVtableGuard();
+            // [1.12] Tu jest najwczesniejszy moment, w ktorym mamy w rece gotowy
+            // IDirect3D9, a wiec i dostep do vtable urzadzenia. Sonda korzysta
+            // z tego, zeby zalozyc swoje przechwyty niezaleznie od sciezki
+            // czcionek - przy ft_hooks=0 ta sciezka nie istnieje i sonda dotad
+            // nie zbierala ani jednej klatki.
+            //
+            // Urzadzenia klienta tu NIE przechwytujemy: podmiana wpisu vtable
+            // zalozona tak wczesnie go nie lapie (sprawdzone), a nasze wlasne
+            // urzadzenie zastepcze wpadaloby we wlasny hak CreateDevice.
             return d3d;
+        }
+
+        HRESULT WINAPI hkDirect3DCreate9Ex(UINT sdkVersion, IDirect3D9Ex** ppD3D) {
+            const HRESULT hr = oDirect3DCreate9Ex(sdkVersion, ppD3D);
+            IDirect3D9Ex* d3d = (ppD3D ? *ppD3D : nullptr);
+            Log("[MSDF] hkDirect3DCreate9Ex: sdk=%u hr=0x%08lX", sdkVersion, hr);
+            if (SUCCEEDED(hr) && d3d) {
+                PatchInterfaceVtable(d3d, "hkDirect3DCreate9Ex");
+                StartVtableGuard();
+            }
+            return hr;
         }
 
         // Podpiecie pod eksport d3d9.dll; wolane, gdy modul jest juz w procesie.
         void TryHookD3D9(HMODULE hMod) {
-            if (g_d3d9Hooked || !hMod) return;
+            if (!hMod) return;
             auto fn = reinterpret_cast<Direct3DCreate9_t>(GetProcAddress(hMod, "Direct3DCreate9"));
             if (!fn) return;
-            Log("[MSDF] d3d9.dll zlapana, Direct3DCreate9 = %p", fn);
+
+            // [1.12] Dotad bylo "hakuj pierwszy modul o nazwie d3d9 i przestan".
+            // To wystarcza tylko wtedy, gdy taki modul jest jeden. W tym kliencie
+            // w dlls.txt siedzi osobny wpis dxvk plus kilka modow, wiec moze byc
+            // proxy przekazujace do wlasciwego DXVK - a wtedy klient tworzy
+            // urzadzenie przez TEN DRUGI modul i nasz hak nie widzi tego ani razu.
+            // Tak wlasnie wygladal log przez caly dzien: hkDirect3DCreate9 odpalal
+            // sie, a hkCreateDevice tylko dla NASZEGO urzadzenia zastepczego.
+            // Dlatego hakujemy kazdy modul, ktory ten eksport ma, z odsiewem po
+            // adresie funkcji.
+            char nazwa[MAX_PATH] = {0};
+            GetModuleFileNameA(hMod, nazwa, MAX_PATH);
+            // Uwaga na porownania z oDirect3DCreate9: po Hooks::Detour ta zmienna
+            // trzyma juz TRAMPOLINE, a nie adres eksportu. Pierwsza wersja tego
+            // sprawdzenia melodowala przez to "drugi modul" dla tego samego pliku.
+            if (g_d3d9Hooked) {
+                Log("[MSDF] kolejny modul z Direct3DCreate9: %s (%p) - detour zostaje na pierwszym",
+                    nazwa, fn);
+                return;
+            }
+            Log("[MSDF] d3d9 zlapana: %s, Direct3DCreate9 = %p", nazwa, fn);
             g_d3d9Hooked = true;
             oDirect3DCreate9 = fn;
+
+            // [1.12] Direct3DCreate9Ex to DRUGIE wejscie do d3d9 i dotad bylo
+            // nieobsadzone. Podejrzenie: hkDirect3DCreate9 odpala sie raz (pewnie
+            // z ktoregos moda), my latamy vtable TAMTEGO obiektu, a klient bierze
+            // swoje IDirect3D9Ex stad - i dlatego hkCreateDevice nie odpalil sie
+            // dla urzadzenia klienta ANI RAZU przez caly dzien. Stad cale
+            // obchodzenie problemu urzadzeniem zastepczym, ktore okazalo sie
+            // przyczyna szarpania.
+            if (auto fnEx = reinterpret_cast<Direct3DCreate9Ex_t>(GetProcAddress(hMod, "Direct3DCreate9Ex"))) {
+                oDirect3DCreate9Ex = fnEx;
+                Log("[MSDF] Direct3DCreate9Ex = %p", fnEx);
+            } else {
+                Log("[MSDF] brak eksportu Direct3DCreate9Ex");
+            }
             // [1.12] Status transakcji MUSI byc sprawdzony: to leci z wnetrza
             // haka LoadLibrary, czyli pod blokada loadera, gdzie Detours potrafi
             // odmowic. Pierwsza wersja ignorowala wynik i urzadzenie po cichu
@@ -442,15 +601,19 @@ namespace D3D {
             const LONG b1 = DetourTransactionBegin();
             const LONG u1 = DetourUpdateThread(GetCurrentThread());
             const LONG a1 = Hooks::Detour(&oDirect3DCreate9, hkDirect3DCreate9);
+            const LONG a2 = oDirect3DCreate9Ex
+                ? Hooks::Detour(&oDirect3DCreate9Ex, hkDirect3DCreate9Ex) : 0;
             const LONG c1 = DetourTransactionCommit();
-            Log("[MSDF] detour Direct3DCreate9: begin=%ld update=%ld attach=%ld commit=%ld",
-                b1, u1, a1, c1);
+            Log("[MSDF] detour Direct3DCreate9: begin=%ld update=%ld attach=%ld attachEx=%ld commit=%ld",
+                b1, u1, a1, a2, c1);
         }
 
         bool IsD3D9Name(const char* name) {
             if (!name) return false;
-            const char* slash = strrchr(name, '\\');
-            if (slash) name = slash + 1;
+            if (const char* slash = strrchr(name, '\\')) name = slash + 1;
+            // Ukosnik w przod tez: wpis dxvk w dlls.txt potrafi podac sciezke
+            // w postaci "dxvk/d3d9.dll", a wtedy sam backslash nie wystarczy.
+            if (const char* fwd = strrchr(name, '/')) name = fwd + 1;
             return _stricmp(name, "d3d9.dll") == 0 || _stricmp(name, "d3d9") == 0;
         }
 
@@ -659,17 +822,40 @@ namespace {
         return oEndSceneShared(device);
     }
 
-    void CaptureDeviceViaSharedVtable() {
-        if (g_sharedTried) return;
-        g_sharedTried = true;
+    // [1.12] Zdobycie vtable IDirect3DDevice9 bez czekania na urzadzenie klienta.
+    // Tworzy jednorazowe urzadzenie 8x8, czyta z niego wskaznik tablicy
+    // wirtualnej i od razu je zwalnia. Sama tablica jest statyczna i wspolna dla
+    // wszystkich urzadzen z tego d3d9.dll, wiec zostaje wazna po zwolnieniu.
+    void** AcquireSharedDeviceVtable(IDirect3D9* provided) {
+        static void** cached = nullptr;
+        static bool tried = false;
+        if (tried) return cached;
+        tried = true;
 
-        HMODULE hMod = GetModuleHandleA("d3d9.dll");
-        if (!hMod) { Log("[MSDF] wspoldzielona vtable: brak d3d9.dll"); return; }
-        auto create = reinterpret_cast<IDirect3D9* (WINAPI*)(UINT)>(GetProcAddress(hMod, "Direct3DCreate9"));
-        if (!create) { Log("[MSDF] wspoldzielona vtable: brak Direct3DCreate9"); return; }
+        // [1.12] Blokada MUSI byc tutaj, a nie w CaptureDeviceViaSharedVtable.
+        // Postawiona pietro wyzej nie dzialala: sonda wola te funkcje wprost
+        // i urzadzenie zastepcze i tak powstawalo, o czym log mowil dopiero
+        // PO fakcie ("POMINIETE" trzy linie ponizej "CreateDevice dev=...").
+        // Powod, dla ktorego to jest domyslnie wylaczone - patrz nizej,
+        // przy CaptureDeviceViaSharedVtable.
+        if (!MSDF::CfgFlagOptIn("shared_vtable")) {
+            Log("[MSDF] urzadzenie zastepcze NIE bedzie tworzone (shared_vtable wylaczone)");
+            return nullptr;
+        }
 
-        IDirect3D9* d3d = create(D3D_SDK_VERSION);
-        if (!d3d) { Log("[MSDF] wspoldzielona vtable: Direct3DCreate9 dal null"); return; }
+        // Gdy wolajacy ma juz IDirect3D9 (hkDirect3DCreate9), uzywamy jego -
+        // wlasne Direct3DCreate9 weszloby rekurencyjnie w zdetourowany eksport.
+        IDirect3D9* d3d = provided;
+        const bool ownD3d = (provided == nullptr);
+
+        if (ownD3d) {
+            HMODULE hMod = GetModuleHandleA("d3d9.dll");
+            if (!hMod) { Log("[MSDF] wspoldzielona vtable: brak d3d9.dll"); return nullptr; }
+            auto create = reinterpret_cast<IDirect3D9* (WINAPI*)(UINT)>(GetProcAddress(hMod, "Direct3DCreate9"));
+            if (!create) { Log("[MSDF] wspoldzielona vtable: brak Direct3DCreate9"); return nullptr; }
+            d3d = create(D3D_SDK_VERSION);
+        }
+        if (!d3d) { Log("[MSDF] wspoldzielona vtable: brak IDirect3D9"); return nullptr; }
 
         WNDCLASSA wc = {};
         wc.lpfnWndProc = DefWindowProcA;
@@ -688,30 +874,64 @@ namespace {
         pp.hDeviceWindow = hwnd;
 
         IDirect3DDevice9* tmp = nullptr;
-        HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
-                                       D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &tmp);
+        g_tworzymyZastepcze = true;
+        const HRESULT hr = d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
+                                             D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &tmp);
+        g_tworzymyZastepcze = false;
         Log("[MSDF] wspoldzielona vtable: CreateDevice hr=0x%08lX dev=%p", hr, tmp);
 
         if (SUCCEEDED(hr) && tmp) {
-            void** vtbl = *reinterpret_cast<void***>(tmp);
-            // EndScene to slot 42 w vtable IDirect3DDevice9.
-            DWORD oldProt = 0;
-            if (VirtualProtect(&vtbl[42], sizeof(void*), PAGE_READWRITE, &oldProt)) {
-                oEndSceneShared = reinterpret_cast<EndSceneDev_t>(vtbl[42]);
-                vtbl[42] = reinterpret_cast<void*>(&hkEndSceneShared);
-                DWORD t = 0;
-                VirtualProtect(&vtbl[42], sizeof(void*), oldProt, &t);
-                Log("[MSDF] wspoldzielona vtable: EndScene %p -> %p (czekam na urzadzenie klienta)",
-                    reinterpret_cast<void*>(oEndSceneShared), vtbl[42]);
-            } else {
-                Log("[MSDF] wspoldzielona vtable: VirtualProtect odmowil (%lu)", GetLastError());
-            }
+            cached = *reinterpret_cast<void***>(tmp);
             tmp->Release();
         }
-        d3d->Release();
+        if (ownD3d) d3d->Release();   // cudzego IDirect3D9 nie zwalniamy
         if (hwnd) DestroyWindow(hwnd);
+        return cached;
+    }
+
+    void CaptureDeviceViaSharedVtable(IDirect3D9* provided) {
+        if (g_sharedTried) return;
+        g_sharedTried = true;
+
+        // [1.12] TO JEST PRZYCZYNA SZARPANIA ANIMACJI - domyslnie WYLACZONE.
+        //
+        // Zmierzone: przy renderze czcionek wylaczonym, sondzie bez przechwytow
+        // i nietknietym wpisie vtbl[42] - czyli gdy w klatce nie leci NIC
+        // naszego - samo jednorazowe utworzenie i zwolnienie tego urzadzenia
+        // zastepczego 8x8 wystarcza, zeby animacje wszystkich modeli zaczely
+        // szarpac. Bez niego, przy identycznej reszcie, jest czysto.
+        //
+        // Tworzymy tu drugie urzadzenie D3D9 na DXVK zanim klient utworzy swoje,
+        // razem z wlasnym oknem. Klient dostaje potem urzadzenie w innym stanie
+        // sterownika niz normalnie. Czas klatki zostaje rowny, wiec to nie jest
+        // koszt - to zmiana warunkow.
+        //
+        // Wlaczac wylacznie wpisem shared_vtable=1 i tylko do diagnostyki.
+        // Sama blokada siedzi w AcquireSharedDeviceVtable.
+
+        void** vtbl = AcquireSharedDeviceVtable(provided);
+        if (!vtbl) return;
+
+        // [1.12] PODMIANA WPISU vtable, nie detour ciala. Dziala tylko wtedy, gdy
+        // robi sie ja PO utworzeniu urzadzenia klienta - sprawdzone: zalozona
+        // wczesnie, z hkDirect3DCreate9, nie lapala urzadzenia klienta ani raz
+        // (log konczyl sie na tej linii i nie bylo "urzadzenie przechwycone").
+        // Dlatego to wywolanie zostaje leniwe, z GetDevice(), czyli ze sciezki
+        // czcionek.
+        DWORD oldProt = 0;
+        if (VirtualProtect(&vtbl[42], sizeof(void*), PAGE_READWRITE, &oldProt)) {
+            oEndSceneShared = reinterpret_cast<EndSceneDev_t>(vtbl[42]);
+            vtbl[42] = reinterpret_cast<void*>(&hkEndSceneShared);
+            DWORD t = 0;
+            VirtualProtect(&vtbl[42], sizeof(void*), oldProt, &t);
+            Log("[MSDF] wspoldzielona vtable: EndScene %p -> %p (czekam na urzadzenie klienta)",
+                reinterpret_cast<void*>(oEndSceneShared), vtbl[42]);
+        } else {
+            Log("[MSDF] wspoldzielona vtable: VirtualProtect odmowil (%lu)", GetLastError());
+        }
     }
 }
+
 
     IDirect3DDevice9* GetDevice() {
         if (!g_device) CaptureDeviceViaSharedVtable();

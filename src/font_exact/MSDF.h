@@ -37,7 +37,22 @@ namespace MSDF {
 	// ----  if you want overkill quality, try raising these
 	inline constexpr uint32_t ATLAS_SIZE = 2048; // 1024-2048
 	inline constexpr uint32_t PREGEN_START_KEY = VK_F11;
-	inline constexpr uint32_t SDF_SAMPLER_SLOT = 23;
+	// [1.12] Rejestry stalych naszych shaderow. NIE ruszac w dol bez pomiaru.
+	//
+	// W 3.3.5 Lexara podmieniala bajtkod w obiektach shaderow klienta, wiec
+	// dzielila z nim uklad rejestrow i c23 bylo bezpieczne. Port 1.12 ustawia
+	// wlasne shadery wprost na urzadzeniu, za plecami CGxDevice - a ten cachuje
+	// stale i nie odswieza tego, o czym nie wie. Pomiar w dzialajacym kliencie
+	// po czym klient naprawde pisze w swiecie: vs c2..c186. Poprzedni uklad
+	// (WorldViewProj w c0..c3 domyslnie + control w c23) kolidowal wiec z
+	// klientem na c2, c3 i c23 - okolo 190 nadpisan na klatke.
+	//
+	// Uklad ponizej lezy powyzej calego zakresu klienta. Granice sprzetowe:
+	// vs_3_0 ma c0..c255, ps_3_0 c0..c223 - dlatego control (czytany przez OBA
+	// shadery) siedzi nizej niz WorldViewProj (czytany tylko przez vs).
+	// Wartosci musza sie zgadzac z register(cNN) w MSDFShaders.h.
+	inline constexpr uint32_t SDF_CONTROL_REG = 220;   // vs + ps
+	inline constexpr uint32_t SDF_WVP_REG     = 240;   // tylko vs, 4 rejestry
 	inline constexpr uint32_t ATLAS_GUTTER = 14; // usually spread + 2-4
 	inline constexpr uint32_t SDF_RENDER_SIZE = 96; // 48-128
 	inline constexpr uint32_t SDF_SPREAD = 12; // 6-12
@@ -118,4 +133,7 @@ namespace MSDF {
     // pliku (TexNullFill). Wolac dopiero po MSDF::initialize(), bo to ono
     // wczytuje plik; wczesniej kazda flaga odpowie "wlaczona".
     bool CfgFlag(const char* key);
+
+    // Jak wyzej, ale brak pliku albo brak klucza = WYLACZONE.
+    bool CfgFlagOptIn(const char* key);
 };

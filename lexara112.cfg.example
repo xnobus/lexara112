@@ -39,3 +39,16 @@ msdf_enabled=0
 # Sprawdza NULL przed "wypelnij bialym" w 0x00448920. 0 = crash wraca.
 # Niezalezne od msdf_enabled.
 site_texnullfill=1
+
+# ---------------------------------------------------------------------------
+# Urzadzenie zastepcze D3D9 - patrz docs/szarpanie-animacji-M2.md
+# ---------------------------------------------------------------------------
+# Zeby odczytac adres tablicy wirtualnej urzadzenia, port potrafi utworzyc
+# wlasne jednorazowe urzadzenie 8x8 i zaraz je zwolnic. TO BYLA PRZYCZYNA
+# SZARPANIA ANIMACJI wszystkich modeli - samo jego powstanie wystarczalo,
+# nawet gdy w klatce nie leciala zadna nasza linijka kodu.
+#
+# Domyslnie NIE powstaje; urzadzenie klienta lapiemy przez CreateDevice.
+# Wlaczac wylacznie do diagnostyki. Skutek uboczny wlaczenia: wraca skrot
+# CTRL+ALT+F (jego obsluga siedzi w haku EndScene zakladanym ta droga).
+#shared_vtable=1

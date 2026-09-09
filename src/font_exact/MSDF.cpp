@@ -259,8 +259,8 @@ namespace {
         if (!fontHandle) {
             if (IDirect3DDevice9* device = D3D::GetDevice()) {
                 constexpr float resetControl[4] = { 0, 0, 0, 0 };
-                device->SetPixelShaderConstantF(MSDF::SDF_SAMPLER_SLOT, resetControl, 1);
-                device->SetVertexShaderConstantF(MSDF::SDF_SAMPLER_SLOT, resetControl, 1);
+                device->SetPixelShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
+                device->SetVertexShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
                 // [1.12] Czcionka nieobslugiwana przez MSDF - wracamy na potok staly.
                 UnbindMsdfShaders(device);
             }
@@ -327,8 +327,8 @@ namespace {
             is3d ? 0.0f : ((flags & 8) ? 2.0f : ((flags & 1) ? 1.0f : 0.0f)),
             MSDF::SDF_SPREAD, MSDF::ATLAS_SIZE
         };
-        device->SetPixelShaderConstantF(MSDF::SDF_SAMPLER_SLOT, controlFlag, 1);
-        device->SetVertexShaderConstantF(MSDF::SDF_SAMPLER_SLOT, controlFlag, 1);
+        device->SetPixelShaderConstantF(MSDF::SDF_CONTROL_REG, controlFlag, 1);
+        device->SetVertexShaderConstantF(MSDF::SDF_CONTROL_REG, controlFlag, 1);
     }
 
     // ------------------------------------------------------------------
@@ -430,10 +430,24 @@ namespace {
 
         device->SetVertexShader(s_cachedVS);
         device->SetPixelShader(s_cachedPS);
-        device->SetVertexShaderConstantF(0, c, 4);
+        const HRESULT hrWvp = device->SetVertexShaderConstantF(MSDF::SDF_WVP_REG, c, 4);
 
         if (!g_logBind) {
             g_logBind = true;
+            // [1.12] Rejestry lezace ponad zakresem klienta (patrz MSDF.h). Jesli
+            // sterownik zglosi tu blad, znaczy ze urzadzenie ma mniej stalych
+            // niz vs_3_0 - wtedy trzeba zejsc nizej, ale nadal ponad c186.
+            D3DCAPS9 caps{};
+            device->GetDeviceCaps(&caps);
+            Log("[MSDF] stale: WorldViewProj -> c%u..c%u (hr=0x%08lX), control -> c%u."
+                " MaxVertexShaderConst urzadzenia = %lu",
+                MSDF::SDF_WVP_REG, MSDF::SDF_WVP_REG + 3, hrWvp,
+                MSDF::SDF_CONTROL_REG, caps.MaxVertexShaderConst);
+            if (FAILED(hrWvp) || caps.MaxVertexShaderConst < MSDF::SDF_WVP_REG + 4) {
+                Log("[MSDF] UWAGA: urzadzenie ma za malo rejestrow stalych na nasz uklad."
+                    " Tekst bedzie zle transformowany. Zejsc z SDF_WVP_REG w MSDF.h,"
+                    " ale nie nizej niz ponad zakres klienta (zmierzone: do c198).");
+            }
             Log("[MSDF] pierwszy bind. WVP (po ewentualnej transpozycji):");
             Log("       %8.3f %8.3f %8.3f %8.3f", c[0], c[1], c[2], c[3]);
             Log("       %8.3f %8.3f %8.3f %8.3f", c[4], c[5], c[6], c[7]);
@@ -452,8 +466,8 @@ namespace {
         pThis->RenderBatch();
         if (IDirect3DDevice9* device = D3D::GetDevice()) {
             constexpr float resetControl[4] = { 0, 0, 0, 0 };
-            device->SetPixelShaderConstantF(MSDF::SDF_SAMPLER_SLOT, resetControl, 1);
-            device->SetVertexShaderConstantF(MSDF::SDF_SAMPLER_SLOT, resetControl, 1);
+            device->SetPixelShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
+            device->SetVertexShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
             // [1.12] Obowiazkowe: bez tego reszta interfejsu rysowalaby sie
             // naszym shaderem czcionek. W 3.3.5 klient przestawial shader sam.
             UnbindMsdfShaders(device);
@@ -885,4 +899,21 @@ void MSDF::initialize() {
 
 bool MSDF::CfgFlag(const char* key) {
     return CfgOn(key);
+}
+
+// [1.12] Odwrotnosc CfgOn: brak pliku ALBO brak klucza znaczy WYLACZONE.
+// Dla latek, ktorych domyslnie wlaczac nie wolno.
+bool MSDF::CfgFlagOptIn(const char* key) {
+    if (g_cfgText.empty()) return false;
+    const std::string needle = std::string(key) + "=";
+    size_t pos = 0;
+    while ((pos = g_cfgText.find(needle, pos)) != std::string::npos) {
+        const bool lineStart = (pos == 0) || g_cfgText[pos - 1] == 10 || g_cfgText[pos - 1] == 13;
+        if (lineStart) {
+            const size_t v = pos + needle.size();
+            return (v < g_cfgText.size()) && g_cfgText[v] != '0';
+        }
+        pos += needle.size();
+    }
+    return false;
 }
