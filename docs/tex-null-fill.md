@@ -44,6 +44,17 @@ Callback ladowania tekstury `0x0044A260`:
 - nieudane otwarcie pliku - `0x005A369D`: `test eax,eax` / `jne`, galaz bledu
   wychodzi z `eax` juz wyzerowanym.
 
+**Otwarta zagadka.** Funkcja tworzaca teksture (`0x0044A140`) otwiera plik juz na
+wejsciu (`0x0044A164 call 005A3660`) i przy porazce zwraca 0, nie tworzac obiektu -
+wiec z tego kodu wynika, ze nieistniejacy plik NIE powinien w ogole dojsc do
+callbacku. A dochodzi: reprodukcja nizej opiera sie wlasnie na sciezkach do plikow,
+ktorych nie ma. Czyli albo obiekt powstaje jeszcze gdzies indziej, albo nazwa jest
+rozwiazywana inaczej przy tworzeniu niz przy ladowaniu. Nie ustalone.
+
+Rejestry w chwili crasha mowia, ze pekl poziom mipmapy **2x1** (`ESI=2`, `EDX=1`,
+`EBX=8` = 2*1*4). Lancuch 256x32 (paski) i 256x128 (`logo.tga`) schodzi wlasnie do
+2x1, a oba to `.tga`, czyli pliki bez mipmap. Poszlaka, nie ustalenie.
+
 `0x00448920` chodzi po lancuchu mipmap tablicy zastepczej i wypelnia ja
 wartoscia `0FFFFFFFFh`. Tablica istnieje, ale **jej wpisy sa NULL** - bufor
 zastepczy nie jest w tym kliencie nigdy alokowany:
