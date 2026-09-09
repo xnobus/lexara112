@@ -11,9 +11,9 @@ litery, cyfry, kropki, myslniki i podkreslniki na swoich miejscach.
 | sciezka | co to |
 |---|---|
 | `_wiedza/lexara-port-mapa.md` | **komplet adresow i etapow** - offsety struktur, konwencje, wszystkie ustalenia z binarki |
-| `_lexara-port/` | budowalny projekt (`build.bat` -> `lexara112.dll`), wlasny README |
-| `_lexara-narzedzia/` | skrypty do porownywania binarek 1.12 vs 3.3.5a |
-| `_lexara-probe/` | sonda zdolnosci urzadzenia (kompiluje i rysuje shadery Lexary) |
+| `..\twow_workspace\lexara112\` | **repo git**: budowalny projekt (`build.bat` -> `lexara112.dll`), `docs\`, wlasny README |
+| `..\twow_workspace\_lexara-narzedzia\` | skrypty do porownywania binarek 1.12 vs 3.3.5a |
+| `..\twow_workspace\_lexara-probe\` | sonda zdolnosci urzadzenia (kompiluje i rysuje shadery Lexary) |
 | `lexara112.dll` | wgrany DLL, wstrzykiwany przez VanillaFixes (wpis w `dlls.txt`) |
 | `lexara112.cfg` | przelaczniki latek - patrz nizej |
 | `lexara112.log` | log DLL-a (domyslnie oszczedny) |
