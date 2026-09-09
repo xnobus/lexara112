@@ -113,4 +113,9 @@ namespace MSDF {
 	}
 
     void initialize();
+
+    // Odczyt jednej flagi z lexara112.cfg, wystawiony dla latek spoza tego
+    // pliku (TexNullFill). Wolac dopiero po MSDF::initialize(), bo to ono
+    // wczytuje plik; wczesniej kazda flaga odpowie "wlaczona".
+    bool CfgFlag(const char* key);
 };

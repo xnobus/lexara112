@@ -1,6 +1,7 @@
 #include "D3D.h"
 #include "Hooks.h"
 #include "MSDF.h"
+#include "TexNullFill.h"
 #include "../Logger.h"
 
 #include <Windows.h>
@@ -31,6 +32,11 @@ namespace {
 
         D3D::initialize();
         MSDF::initialize();
+        // Po MSDF::initialize(), bo to ono wczytuje lexara112.cfg, a latka
+        // czyta z niego wlasna flage. Celowo POZA bramka msdf_enabled:
+        // dotyczy tekstur, nie czcionek, i ma dzialac takze przy wylaczonym
+        // rendererze MSDF.
+        TexNullFill::initialize();
 
         status = DetourTransactionCommit();
         if (status != NO_ERROR) {

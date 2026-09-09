@@ -882,3 +882,7 @@ void MSDF::initialize() {
     Hooks::Detour(&FreeType::InitFn, FreeType_InitHk);
     s_msdfInitHookArmed = true;
 }
+
+bool MSDF::CfgFlag(const char* key) {
+    return CfgOn(key);
+}

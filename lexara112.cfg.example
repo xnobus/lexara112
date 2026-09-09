@@ -34,3 +34,8 @@ shaders=1
 # Renderer MSDF: 1 = wlaczony, 0 = klient rysuje po swojemu.
 # Przelacza tez CTRL+ALT+F11 w grze - zapis dziala od nastepnego uruchomienia.
 msdf_enabled=0
+
+# --- latka na crash 0x00448955 (nieistniejaca tekstura) ---
+# Sprawdza NULL przed "wypelnij bialym" w 0x00448920. 0 = crash wraca.
+# Niezalezne od msdf_enabled.
+site_texnullfill=1
