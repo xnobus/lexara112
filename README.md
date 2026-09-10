@@ -21,8 +21,10 @@ Trzy rzeczy, ktore trzeba wiedziec, zanim sie tu cokolwiek ruszy:
    wlasne, jednorazowe urzadzenie na ukrytym oknie 8x8, podmieniamy w jego vtable
    `EndScene` (slot 42) i zwalniamy swoje. Obiekty tej samej klasy C++ dziela vtable,
    wiec od tej chwili urzadzenie klienta samo sie przedstawia w `this`.
-3. **Ladowanie idzie przez VanillaFixes, nie przez proxy `dinput8.dll`.** Stad
-   `src/dllmain112.cpp` zamiast `dllmain.cpp` + `Proxy.cpp`.
+3. **Ladowanie idzie przez VanillaFixes, nie przez proxy `dinput8.dll`.** Klient
+   1.12 wstrzykuje DLL-e z listy `dlls.txt`, wiec caly proxy (`dllmain.cpp`,
+   `Proxy.cpp`, `dinput8_exports.def` w oryginale) jest tu zbedny - zastepuje go
+   samo `src/dllmain112.cpp`.
 
 Kazda zmiana merytoryczna (nie sam adres) ma w kodzie komentarz `[1.12]`.
 
@@ -76,7 +78,9 @@ i CMake. `build.bat` bierze `cmake` z PATH, a gdy go tam nie ma - ze zmiennej
 
 ## Zmienione pliki Lexary
 
-Kopie oryginalow 3.3.5 leza obok, jako `.bak-335`:
+Wersje wyjsciowe tych plikow sa w repozytorium oryginalu
+([Stormhand-dev/Lexara](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5));
+pelny diff portu siedzi w historii gita.
 
 - `src/font_exact/GameClient.h` - adresy i konwencje 1.12, uklad `CGxString`,
   FreeType na `__fastcall`.

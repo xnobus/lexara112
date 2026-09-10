@@ -1,9 +1,10 @@
 // Lexara na Turtle WoW 1.12 - punkt wejscia DLL.
 //
-// Roznica wobec oryginalu: 3.3.5 ladowal Lexare jako proxy dinput8.dll
-// (stad Proxy.cpp i dinput8_exports.def). Ten klient wstrzykuje DLL-e
-// z listy `dlls.txt` przez VanillaFixes.exe, wiec proxy jest zbedne -
-// wystarczy zwykly DLL dopisany do tej listy.
+// Roznica wobec oryginalu: 3.3.5 ladowal Lexare jako proxy dinput8.dll.
+// Ten klient wstrzykuje DLL-e z listy `dlls.txt` przez VanillaFixes.exe,
+// wiec proxy jest zbedne - wystarczy zwykly DLL dopisany do tej listy.
+// Warstwy proxy z oryginalu (dllmain.cpp, Proxy.cpp, dinput8_exports.def)
+// nie ma w tym repozytorium.
 //
 // Nie ladujemy tez LuxShoulderCam.dll (mod do 3.3.5, nie istnieje tutaj).
 

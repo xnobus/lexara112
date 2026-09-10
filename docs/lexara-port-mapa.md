@@ -1,7 +1,8 @@
 # Lexara (3.3.5) -> Turtle WoW 1.12 : mapa miejsc (etap 1)
 
 Zrodlo: `lexara/src/font_exact/MSDF.cpp`, `GameClient.h`.
-Binarki: `D:\wow\World of Warcraft 3.3.5a - Copy\Wow.exe` i `F:\wof of warcra\twmoa_1171\WoW.exe`.
+Binarki porownywane przy sporzadzaniu mapy: `Wow.exe` klienta 3.3.5a (build 12340)
+i `WoW.exe` klienta Turtle WoW `twmoa_1171`.
 
 Granice funkcji brane z indeksu celow CALL (1.12 nie wyrownuje funkcji bajtami int3,
 wiec szukanie po wypelnieniu daje tam smieci).
@@ -249,8 +250,8 @@ te globale w 1.12 nie istnieja.
 
 ## Pomiar: czy `ps_3_0` dziala pod DXVK tego klienta - TAK
 
-Sonda `_lexara-probe/probe.cpp` (build `build.bat`, kopia jako `_lexara_probe.exe`
-w katalogu klienta, zeby ladowac **jego** `d3d9.dll`). Kompiluje ORYGINALNE shadery
+Osobna sonda (nie wchodzi w sklad tego repozytorium): maly EXE uruchamiany
+z katalogu klienta, zeby ladowac **jego** `d3d9.dll`. Kompiluje ORYGINALNE shadery
 Lexary bez zmian, tworzy je i **rysuje nimi do celu renderowania, po czym czyta piksele**.
 
 ```

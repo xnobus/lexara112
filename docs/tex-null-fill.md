@@ -146,8 +146,7 @@ mowi tylko tyle, ze latka sie zalozyla. Rozstrzyga dopiero test z kontrola:
 sprawdzone, klient przezywa nawet przy wylaczonej latce. Reprodukcja wymaga
 sciezki zapisanej w bazie addona i przemalowania wiersza, ktory ja rysuje:
 w WeakestAuras jest to `groupIcon` grupy i **zwiniecie tej grupy** w liscie aur
-(`Regions.lua`, `groupModifyThumbnail`). Szczegoly: `_wiedza\weakauras.md`
-w katalogu gry.
+(`Regions.lua`, `groupModifyThumbnail`).
 
 Wniosek metodyczny: sonda bez kontroli o znanym wyniku nie jest sonda. Pierwsza
 wersja tej sondy nie crashowala klienta i wygladalo to na dzialajaca latke,

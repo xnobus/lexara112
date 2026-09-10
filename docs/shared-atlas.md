@@ -162,5 +162,5 @@ Czego szukac w `lexara112.log`:
 | `strona N utworzona (..., atlas wspolny)` | maksymalnie 4 razy na sesje, nie 4 razy na kroj |
 | `ODMOWIL` | nie powinno sie juz pojawiac po zbudowaniu 4 stron |
 
-Kopia poprzedniego DLL-a: `lexara112.dll.bak-perfont-atlas` w katalogu gry.
-Kopie zrodel: `MSDFFont.h.bak-sharedatlas`, `MSDFFont.cpp.bak-sharedatlas`.
+Stan sprzed przejscia na atlas wspolny jest w historii gita (`MSDFFont.h`,
+`MSDFFont.cpp` przed commitem wprowadzajacym te zmiane).

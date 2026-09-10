@@ -5,7 +5,7 @@ project(Lexara112 LANGUAGES CXX C)
 # Lexara (HD MSDF font renderer) -> Turtle WoW 1.12 / twmoa_1171.
 # Cel: lexara112.dll, wstrzykiwany przez VanillaFixes (wpis w dlls.txt).
 # Oryginal: https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5
-# Mapa portu: ..\_lexara-port-mapa.md
+# Mapa portu: docs/lexara-port-mapa.md
 # ---------------------------------------------------------------
 
 set(CMAKE_CXX_STANDARD 20)
@@ -55,7 +55,7 @@ file(GLOB FONT_EXACT_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/font_exa
 list(REMOVE_ITEM FONT_EXACT_SOURCES "${CMAKE_SOURCE_DIR}/src/font_exact/MSDF.cpp")
 
 set(SOURCES
-    "${CMAKE_SOURCE_DIR}/src/dllmain112.cpp"   # zamiast dllmain.cpp + Proxy.cpp (brak proxy dinput8)
+    "${CMAKE_SOURCE_DIR}/src/dllmain112.cpp"   # zamiast proxy dinput8 z oryginalu
     "${CMAKE_SOURCE_DIR}/src/MSDF.cpp"
     ${FONT_EXACT_SOURCES}
 )

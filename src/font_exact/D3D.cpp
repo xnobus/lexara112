@@ -741,8 +741,8 @@ namespace {
     // swoje urzadzenie. Od tej chwili KAZDE urzadzenie DXVK-a w tym procesie,
     // takze to klienta, przechodzi przez nasz EndScene i podaje sie w `this`.
     //
-    // Sonda dowodzaca wykonalnosci: _lexara-probe utworzyl urzadzenie tym samym
-    // d3d9.dll bez zadnych skutkow ubocznych.
+    // Sonda dowodzaca wykonalnosci (osobny EXE, poza repo) utworzyla
+    // urzadzenie tym samym d3d9.dll bez zadnych skutkow ubocznych.
     // ------------------------------------------------------------------
     using EndSceneDev_t = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*);
     EndSceneDev_t oEndSceneShared = nullptr;

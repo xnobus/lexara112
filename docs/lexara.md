@@ -10,11 +10,9 @@ litery, cyfry, kropki, myslniki i podkreslniki na swoich miejscach.
 
 | sciezka | co to |
 |---|---|
-| `_wiedza/lexara-port-mapa.md` | **komplet adresow i etapow** - offsety struktur, konwencje, wszystkie ustalenia z binarki |
-| `..\twow_workspace\lexara112\` | **repo git**: budowalny projekt (`build.bat` -> `lexara112.dll`), `docs\`, wlasny README |
-| `..\twow_workspace\_lexara-narzedzia\` | skrypty do porownywania binarek 1.12 vs 3.3.5a |
-| `..\twow_workspace\_lexara-probe\` | sonda zdolnosci urzadzenia (kompiluje i rysuje shadery Lexary) |
-| `lexara112.dll` | wgrany DLL, wstrzykiwany przez VanillaFixes (wpis w `dlls.txt`) |
+| [`docs/lexara-port-mapa.md`](lexara-port-mapa.md) | **komplet adresow i etapow** - offsety struktur, konwencje, wszystkie ustalenia z binarki |
+| `build.bat` -> `build/out/Release/lexara112.dll` | budowanie projektu |
+| `lexara112.dll` | wgrany DLL w katalogu klienta, wstrzykiwany przez VanillaFixes (wpis w `dlls.txt`) |
 | `lexara112.cfg` | przelaczniki latek - patrz nizej |
 | `lexara112.log` | log DLL-a (domyslnie oszczedny) |
 | `Interface/AddOns/LexaraCompare/` | addon `/lexara` - panel porownawczy |
@@ -42,7 +40,7 @@ binarce wolane ani razu, a `RenderBatch` ustawia wylacznie stany potoku stalego.
 Cala warstwa `D3D.cpp` Lexary (haki `IShaderCreate*`, podmiana bajtkodu) nie ma
 tu odpowiednika - port kompiluje wlasne `vs_3_0`/`ps_3_0` i wiaze je sam.
 
-**`ps_3_0` dziala pod DXVK tego klienta** - zmierzone sonda `_lexara-probe`, nie
+**`ps_3_0` dziala pod DXVK tego klienta** - zmierzone osobna sonda, nie
 zalozone: caps SM 3.0/3.0, `fwidth` liczy, FVF wystarcza za deklaracje
 wierzcholkow, cztery atlasy 2048x2048 A8R8G8B8 wchodza. Napisy `ps_2_0` w `.data`
 klienta (tablica `0085C608`) to **martwy kod** - nikt w `.text` ich nie dotyka.
@@ -121,6 +119,6 @@ toolset ma **BuildTools**). CMake z pipa. `.bat` z PowerShella uruchamiac przez
 - `metrics.pixelData` wskazuje na `ownedPixelData` zmiennej LOKALNEJ
   (`MSDFFont.cpp`) - w oryginale nieszkodliwe, bo upload leci natychmiast, ale
   kazde ponowienie uploadu z bufora czytaloby zwolniona pamiec.
-- Pomiar wydajnosci i pamieci wobec `d3d9.textureMemory = 64` (patrz
-  `_wiedza/crash-i-dxvk.md` - ograniczeniem jest liczba zywych mapowan).
+- Pomiar wydajnosci i pamieci wobec `d3d9.textureMemory = 64` (ograniczeniem
+  jest liczba ZYWYCH MAPOWAN tekstur, nie sama ilosc pamieci).
 - Jakosc krojow ozdobnych bez `resolveShapeGeometry` (patrz wyzej).

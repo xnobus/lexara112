@@ -1,8 +1,15 @@
 # Lexara -> Turtle WoW 1.12 (twmoa_1171)
 
+> **Dokument historyczny - zamrozony.** To README z chwili tuz przed pierwszym
+> uruchomieniem portu w grze. Nie jest aktualizowany: opisuje stan sprzed testu,
+> a czesc wymienionych tu plikow (kopie `.bak-335`, warstwa proxy `dllmain.cpp` /
+> `Proxy.cpp`) juz w repozytorium nie istnieje. Wartosc tego tekstu to lista
+> pytan, ktorych **nie dalo sie rozstrzygnac statycznie** - stan biezacy jest
+> w [`../README.md`](../README.md) i [`lexara.md`](lexara.md).
+
 Port renderera czcionek MSDF z https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5.
-Mapa adresow i ustalenia: `..\_wiedza\lexara-port-mapa.md`.
-Skrot calej wiedzy o porcie: `..\_wiedza\lexara.md`. Sonda zdolnosci: `..\_lexara-probe\`.
+Mapa adresow i ustalenia: [`lexara-port-mapa.md`](lexara-port-mapa.md).
+Skrot calej wiedzy o porcie: [`lexara.md`](lexara.md).
 
 ## Stan: gotowy do PIERWSZEGO testu w grze
 
@@ -26,8 +33,7 @@ pomiarem, w tej kolejnosci:
    wszystkich wyjsc z partii.
 4. **Pamiec tekstur.** Cztery atlasy 2048x2048 to 64 MB. Sonda potwierdzila,
    ze wchodza, ale klient ma `d3d9.textureMemory = 64` i historie crashy przy
-   duzej liczbie ZYWYCH MAPOWAN (nie przy ilosci pamieci) - patrz
-   `_wiedza/crash-i-dxvk.md`.
+   duzej liczbie ZYWYCH MAPOWAN (nie przy ilosci pamieci).
 
 **Wycofanie:** usunac wpis z `dlls.txt`. DLL niczego nie zapisuje na dysku
 i nie zmienia plikow klienta - lata pamiec procesu, wiec restart bez wpisu
