@@ -5,30 +5,21 @@ A port of the MSDF-atlas font renderer from the 3.3.5a client to the 1.12 client
 Original: [Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5)
 Licence: GPL-3.0 (same as the original) - see [LICENSE](LICENSE).
 
-**Status: working in game since 2026-09-09.** Text is drawn through the MSDF atlas.
+## Screenshots
 
-## How this port differs from the original
+The `/lexara` panel - the same text at 9 sizes (8-72 px) - with a large piece of UI
+text above it. Same client, same typeface, same settings; only `msdf_enabled`
+differs between the two shots.
 
-Three things to know before touching anything here:
+**Before** - the client's own renderer. Glyphs come from a fixed-size bitmap cache,
+so anything scaled up is blurred and the edges fall apart.
 
-1. **The 1.12 client has no font shaders at all.** 3.3.5 (`006BE230`) creates a
-   vertex and a pixel shader object before calling `InitFontIndexBuffer`; 1.12
-   (`005C17F0`) starts with that call. `SetVertexShader` is not called even once in
-   this binary, and `RenderBatch` sets fixed-pipeline states exclusively. Lexara's
-   entire `D3D.cpp` layer (`IShaderCreate*` hooks, bytecode swapping) has no
-   counterpart here - the port compiles its own `vs_3_0`/`ps_3_0` and binds them
-   itself.
-2. **The D3D device is captured through the shared virtual table.** We create our
-   own throwaway device on a hidden 8x8 window, swap `EndScene` (slot 42) in its
-   vtable and release our own. Objects of the same C++ class share a vtable, so
-   from that moment on the client's device hands itself over in `this`.
-3. **Loading goes through VanillaFixes, not a `dinput8.dll` proxy.** The 1.12
-   client injects the DLLs listed in `dlls.txt`, so the whole proxy layer
-   (`dllmain.cpp`, `Proxy.cpp`, `dinput8_exports.def` in the original) is
-   unnecessary here - `src/dllmain112.cpp` alone replaces it.
+![Before - the client's own font renderer](img/before.png)
 
-Every substantive change (not a mere address) carries a `[1.12]` comment in the
-code.
+**After** - the MSDF renderer. The glyph outline is kept in the atlas and resolved
+in the pixel shader, so the edges stay sharp at every size.
+
+![After - Lexara's MSDF renderer](img/after.png)
 
 ## Installation
 
@@ -82,25 +73,10 @@ it):
 `src/font_exact/MSDFCompat.h` with the same thing msdfgen itself uses in its place
 (`shape.orientContours()`, `main.cpp:1155`).
 
-## Modified Lexara files
-
-The starting versions of these files are in the original's repository
-([Stormhand-dev/Lexara](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5));
-the full diff of the port lives in the git history.
-
-- `src/font_exact/GameClient.h` - 1.12 addresses and conventions, the `CGxString`
-  layout, FreeType on `__fastcall`.
-- `src/font_exact/MSDF.cpp` - ten patch sites, four `naked` stubs,
-  `BindMsdfShaders`/`UnbindMsdfShaders`, FreeType hooks on `__fastcall`.
-- `src/font_exact/D3D.cpp` - the device layer rewritten: instead of seven
-  `CGxDevice` hooks, the chain `LoadLibrary -> Direct3DCreate9 -> CreateDevice`.
-- `src/font_exact/MSDF.h` - font shader globals removed.
-- `src/font_exact/MSDFValidator.h`, `MSDFFont.cpp` -
-  `MSDFCompat::ResolveShapeGeometry`.
-
 ## Documentation
 
 - [`docs/lexara.md`](docs/lexara.md) - everything worth knowing: status, usage,
+  **how this port differs from the original**, the list of modified Lexara files,
   pitfalls, the seven bugs that only showed up in game.
 - [`docs/lexara-port-map.md`](docs/lexara-port-map.md) - **1.12 addresses,
   structure layouts, calling conventions, the course of stages 1-5.** Start here
@@ -121,14 +97,3 @@ Please include:
    removes the symptom is half the diagnosis and needs no DLL rebuild.
 5. On a crash: the contents of the client's `Errors/` directory and the DXVK log
    (`*_d3d9.log`).
-
-## Pitfalls (short version)
-
-- **`commit = 0` from Detours means "no error", NOT "the hook works".** The only
-  probe for whether a hook works is a log line from inside it.
-- **With an assembly stub, check the LIVE REGISTERS**, not just the site length and
-  the return address - 3.3.5 and 1.12 can run the same chain through a different
-  register, and a length check will not catch that.
-- The `ProcessBatch` site (`005C91A8`) is exactly 5 bytes long and is the TARGET of
-  the `je 005C91A9` jump from `005C8FF3` - taking that jump after the patch means
-  jumping into the middle of an instruction.

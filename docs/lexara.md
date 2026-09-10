@@ -42,6 +42,11 @@ and `RenderBatch` sets fixed-pipeline states exclusively. Lexara's entire `D3D.c
 layer (`IShaderCreate*` hooks, bytecode swapping) has no counterpart here - the
 port compiles its own `vs_3_0`/`ps_3_0` and binds them itself.
 
+**Loading goes through VanillaFixes, not a `dinput8.dll` proxy.** The 1.12 client
+injects the DLLs listed in `dlls.txt`, so the whole proxy layer (`dllmain.cpp`,
+`Proxy.cpp`, `dinput8_exports.def` in the original) is unnecessary here -
+`src/dllmain112.cpp` alone replaces it.
+
 **`ps_3_0` works under this client's DXVK** - measured with a separate probe, not
 assumed: caps report SM 3.0/3.0, `fwidth` computes, FVF is enough in place of a
 vertex declaration, and four 2048x2048 A8R8G8B8 atlases fit. The `ps_2_0` strings
@@ -52,6 +57,27 @@ in the client's `.data` (the `0085C608` table) are **dead code** - nothing in
 throwaway device on a hidden 8x8 window, swap `EndScene` (slot 42) in its vtable
 and release our own device. Objects of the same C++ class share a vtable, so from
 that moment on the client's device hands itself over in `this`.
+
+## Modified Lexara files
+
+The starting versions of these files are in the original's repository
+([Stormhand-dev/Lexara](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5));
+the full diff of the port lives in the git history.
+
+- `src/font_exact/GameClient.h` - 1.12 addresses and conventions, the `CGxString`
+  layout, FreeType on `__fastcall`.
+- `src/font_exact/MSDF.cpp` - ten patch sites, four `naked` stubs,
+  `BindMsdfShaders`/`UnbindMsdfShaders`, FreeType hooks on `__fastcall`.
+- `src/font_exact/D3D.cpp` - the device layer rewritten: instead of seven
+  `CGxDevice` hooks, the chain `LoadLibrary -> Direct3DCreate9 -> CreateDevice`.
+- `src/font_exact/MSDF.h` - font shader globals removed.
+- `src/font_exact/MSDFValidator.h`, `MSDFFont.cpp` -
+  `MSDFCompat::ResolveShapeGeometry`.
+- `src/dllmain112.cpp` - replaces the original's `dllmain.cpp` + `Proxy.cpp`
+  proxy layer (see above).
+
+Every substantive change (not a mere address) carries a `[1.12]` comment in the
+code.
 
 ## Seven bugs that only showed up in game
 
