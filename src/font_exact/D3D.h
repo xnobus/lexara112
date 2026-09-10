@@ -231,9 +231,10 @@ namespace D3D {
     using VertexShaderInitCallback = std::function<void(CGxDevice::ShaderData*)>;
     using PixelShaderInitCallback = std::function<void(CGxDevice::ShaderData*)>;
 
-    // [1.12] MARTWE. Te dwie rejestracje odpalal hak CGxDeviceD3d::IShaderCreate*,
-    // ktory w 1.12 nie ma odpowiednika (klient nie tworzy shaderow czcionek).
-    // Zostawione, zeby nie ruszac reszty pliku; nikt ich juz nie wola.
+    // [1.12] DEAD. These two registrations were fired by the
+    // CGxDeviceD3d::IShaderCreate* hook, which has no 1.12 counterpart (the client
+    // creates no font shaders). Kept so as not to disturb the rest of the file;
+    // nothing calls them any more.
     void RegisterVertexShaderInit(const VertexShaderInitCallback& callback);
     void RegisterPixelShaderInit(const PixelShaderInitCallback& callback);
 

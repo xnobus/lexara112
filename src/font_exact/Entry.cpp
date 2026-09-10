@@ -32,10 +32,10 @@ namespace {
 
         D3D::initialize();
         MSDF::initialize();
-        // Po MSDF::initialize(), bo to ono wczytuje lexara112.cfg, a latka
-        // czyta z niego wlasna flage. Celowo POZA bramka msdf_enabled:
-        // dotyczy tekstur, nie czcionek, i ma dzialac takze przy wylaczonym
-        // rendererze MSDF.
+        // After MSDF::initialize(), because that is what loads lexara112.cfg and
+        // the patch reads its own flag from it. Deliberately OUTSIDE the
+        // msdf_enabled gate: it concerns textures, not fonts, and is meant to work
+        // even with the MSDF renderer disabled.
         TexNullFill::initialize();
 
         status = DetourTransactionCommit();

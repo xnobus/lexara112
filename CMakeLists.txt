@@ -3,9 +3,9 @@ project(Lexara112 LANGUAGES CXX C)
 
 # ---------------------------------------------------------------
 # Lexara (HD MSDF font renderer) -> Turtle WoW 1.12 / twmoa_1171.
-# Cel: lexara112.dll, wstrzykiwany przez VanillaFixes (wpis w dlls.txt).
-# Oryginal: https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5
-# Mapa portu: docs/lexara-port-mapa.md
+# Target: lexara112.dll, injected by VanillaFixes (an entry in dlls.txt).
+# Original: https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5
+# Port map: docs/lexara-port-map.md
 # ---------------------------------------------------------------
 
 set(CMAKE_CXX_STANDARD 20)
@@ -21,17 +21,18 @@ add_compile_definitions(
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
-# --- FreeType: bez zaleznosci zewnetrznych (jak w oryginale) ---
+# --- FreeType: no external dependencies (as in the original) ---
 set(FT_DISABLE_ZLIB      ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_PNG       ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_BZIP2     ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_BROTLI    ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_HARFBUZZ  ON CACHE BOOL "" FORCE)
 
-# --- msdfgen: tylko biblioteki, bez narzedzia, bez Skii, bez vcpkg ---
-# SVG i PNG wylaczone celowo: ciagna tinyxml2 i libpng, a port czyta glify
-# przez FreeType i wypisuje je wprost do atlasu - zadnego z tych formatow
-# nie dotyka. Bez tego msdfgen-ext zada find_package(tinyxml2).
+# --- msdfgen: libraries only, no standalone tool, no Skia, no vcpkg ---
+# SVG and PNG are disabled deliberately: they pull in tinyxml2 and libpng, while
+# the port reads glyphs through FreeType and writes them straight into the atlas -
+# it touches neither format. Without this, msdfgen-ext demands
+# find_package(tinyxml2).
 set(MSDFGEN_BUILD_STANDALONE OFF CACHE BOOL "" FORCE)
 set(MSDFGEN_USE_VCPKG        OFF CACHE BOOL "" FORCE)
 set(MSDFGEN_USE_SKIA         OFF CACHE BOOL "" FORCE)
@@ -48,14 +49,14 @@ endif()
 add_subdirectory(third_party/msdfgen          ${CMAKE_BINARY_DIR}/tp/msdfgen)
 
 # ---------------------------------------------------------------
-# Zrodla. font_exact/MSDF.cpp jest WLACZANY przez src/MSDF.cpp,
-# wiec nie moze trafic na liste osobno.
+# Sources. font_exact/MSDF.cpp is #included by src/MSDF.cpp, so it must not be
+# listed separately.
 # ---------------------------------------------------------------
 file(GLOB FONT_EXACT_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/font_exact/*.cpp")
 list(REMOVE_ITEM FONT_EXACT_SOURCES "${CMAKE_SOURCE_DIR}/src/font_exact/MSDF.cpp")
 
 set(SOURCES
-    "${CMAKE_SOURCE_DIR}/src/dllmain112.cpp"   # zamiast proxy dinput8 z oryginalu
+    "${CMAKE_SOURCE_DIR}/src/dllmain112.cpp"   # replaces the original's dinput8 proxy
     "${CMAKE_SOURCE_DIR}/src/MSDF.cpp"
     ${FONT_EXACT_SOURCES}
 )

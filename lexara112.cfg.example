@@ -1,11 +1,11 @@
-# Lexara 1.12 - przelaczniki latek. 0 = wylaczone, 1 = wlaczone.
-# Brak tego pliku = wszystko wlaczone.
-# Po kazdej zmianie wystarczy restart gry - BEZ przebudowy DLL-a.
+# Lexara 1.12 - patch switches. 0 = disabled, 1 = enabled.
+# No such file = everything enabled.
+# A restart of the game is enough after every change - NO DLL rebuild needed.
 #
-# KROK 1 (teraz): wszystko wylaczone, LACZNIE z hakiem FT_New_Library.
-# tekst MUSI wrocic. Jesli nie wroci, winowajca nie jest w tej liscie.
+# STEP 1 (for now): everything disabled, INCLUDING the FT_New_Library hook.
+# The text MUST come back. If it does not, the culprit is not in this list.
 
-# --- dziesiec miejsc latania (wstawki asemblerowe w kodzie klienta) ---
+# --- the ten patch sites (assembly stubs inside the client's code) ---
 site_initbuf=1
 site_allocbuf=1
 site_checkgeom=1
@@ -17,7 +17,7 @@ site_bufalloc3=1
 site_procbatch=1
 site_glyphy=1
 
-# --- haki na funkcjach czcionek klienta ---
+# --- hooks on the client's font functions ---
 hook_renderbatch=1
 hook_renderglyph=1
 hook_getglyph=1
@@ -25,30 +25,30 @@ hook_checkgeom=1
 hook_writegeom=1
 hook_initline=1
 
-# --- haki FreeType (podmiana biblioteki klienta na te z Lexary) ---
+# --- FreeType hooks (the client's library is replaced with Lexara's) ---
 ft_hooks=1
 
-# --- kompilacja i wiazanie wlasnych shaderow ---
+# --- compiling and binding our own shaders ---
 shaders=1
 
-# Renderer MSDF: 1 = wlaczony, 0 = klient rysuje po swojemu.
-# Przelacza tez CTRL+ALT+F11 w grze - zapis dziala od nastepnego uruchomienia.
+# The MSDF renderer: 1 = enabled, 0 = the client draws text its own way.
+# CTRL+ALT+F11 toggles it in game as well - the write takes effect on the next launch.
 msdf_enabled=0
 
-# --- latka na crash 0x00448955 (nieistniejaca tekstura) ---
-# Sprawdza NULL przed "wypelnij bialym" w 0x00448920. 0 = crash wraca.
-# Niezalezne od msdf_enabled.
+# --- patch for the 0x00448955 crash (a texture that does not exist) ---
+# Checks for NULL before the "fill with white" at 0x00448920. 0 = the crash returns.
+# Independent of msdf_enabled.
 site_texnullfill=1
 
 # ---------------------------------------------------------------------------
-# Urzadzenie zastepcze D3D9 - patrz docs/szarpanie-animacji-M2.md
+# The D3D9 stand-in device - see docs/animation-stutter-M2.md
 # ---------------------------------------------------------------------------
-# Zeby odczytac adres tablicy wirtualnej urzadzenia, port potrafi utworzyc
-# wlasne jednorazowe urzadzenie 8x8 i zaraz je zwolnic. TO BYLA PRZYCZYNA
-# SZARPANIA ANIMACJI wszystkich modeli - samo jego powstanie wystarczalo,
-# nawet gdy w klatce nie leciala zadna nasza linijka kodu.
+# To read the address of the device's virtual table, the port can create its own
+# throwaway 8x8 device and release it right away. THIS WAS THE CAUSE OF THE
+# ANIMATION STUTTER on every model - merely creating it was enough, even when not
+# a single line of our code ran during the frame.
 #
-# Domyslnie NIE powstaje; urzadzenie klienta lapiemy przez CreateDevice.
-# Wlaczac wylacznie do diagnostyki. Skutek uboczny wlaczenia: wraca skrot
-# CTRL+ALT+F (jego obsluga siedzi w haku EndScene zakladanym ta droga).
+# By default it is NOT created; the client's device is caught through CreateDevice.
+# Enable it for diagnostics only. Side effect of enabling it: the CTRL+ALT+F
+# shortcut comes back (its handler lives in the EndScene hook installed this way).
 #shared_vtable=1

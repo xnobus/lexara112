@@ -332,7 +332,7 @@ private:
         msdfgen::Shape shape;
         if (!msdfgen::loadGlyph(shape, font, codepoint))  return false;
         if (shape.contours.empty()) return true;
-        MSDFCompat::ResolveShapeGeometry(shape);  // [1.12] msdfgen bez Skii
+        MSDFCompat::ResolveShapeGeometry(shape);  // [1.12] msdfgen without Skia
         return validateResolvedShape(shape, tol);
     }
 };

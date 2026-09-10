@@ -37,34 +37,36 @@ namespace MSDF {
 	// ----  if you want overkill quality, try raising these
 	inline constexpr uint32_t ATLAS_SIZE = 2048; // 1024-2048
 	inline constexpr uint32_t PREGEN_START_KEY = VK_F11;
-	// [1.12] Rejestry stalych naszych shaderow. NIE ruszac w dol bez pomiaru.
+	// [1.12] The constant registers used by our shaders. Do NOT move them down
+	// without measuring.
 	//
-	// W 3.3.5 Lexara podmieniala bajtkod w obiektach shaderow klienta, wiec
-	// dzielila z nim uklad rejestrow i c23 bylo bezpieczne. Port 1.12 ustawia
-	// wlasne shadery wprost na urzadzeniu, za plecami CGxDevice - a ten cachuje
-	// stale i nie odswieza tego, o czym nie wie. Pomiar w dzialajacym kliencie
-	// po czym klient naprawde pisze w swiecie: vs c2..c186. Poprzedni uklad
-	// (WorldViewProj w c0..c3 domyslnie + control w c23) kolidowal wiec z
-	// klientem na c2, c3 i c23 - okolo 190 nadpisan na klatke.
+	// In 3.3.5 Lexara swapped the bytecode inside the client's own shader objects,
+	// so it shared the client's register layout and c23 was safe. The 1.12 port
+	// sets its own shaders directly on the device, behind CGxDevice's back - and
+	// CGxDevice caches constants and does not refresh what it does not know about.
+	// Measured in a running client, the range the client actually writes to in the
+	// world is vs c2..c186. The previous layout (WorldViewProj in the default
+	// c0..c3 plus control in c23) therefore collided with the client on c2, c3 and
+	// c23 - about 190 overwrites per frame.
 	//
-	// Uklad ponizej lezy powyzej calego zakresu klienta. Granice sprzetowe:
-	// vs_3_0 ma c0..c255, ps_3_0 c0..c223 - dlatego control (czytany przez OBA
-	// shadery) siedzi nizej niz WorldViewProj (czytany tylko przez vs).
-	// Wartosci musza sie zgadzac z register(cNN) w MSDFShaders.h.
+	// The layout below sits above the client's entire range. Hardware limits:
+	// vs_3_0 has c0..c255, ps_3_0 has c0..c223 - which is why control (read by BOTH
+	// shaders) sits lower than WorldViewProj (read by the vs only).
+	// The values must match the register(cNN) declarations in MSDFShaders.h.
 	inline constexpr uint32_t SDF_CONTROL_REG = 220;   // vs + ps
-	inline constexpr uint32_t SDF_WVP_REG     = 240;   // tylko vs, 4 rejestry
+	inline constexpr uint32_t SDF_WVP_REG     = 240;   // vs only, 4 registers
 	inline constexpr uint32_t ATLAS_GUTTER = 14; // usually spread + 2-4
 	inline constexpr uint32_t SDF_RENDER_SIZE = 96; // 48-128
 	inline constexpr uint32_t SDF_SPREAD = 12; // 6-12
 	inline constexpr D3DFORMAT D3DFMT = D3DFMT_A8R8G8B8; // D3DFMT_A8R8G8B8-D3DFMT_A16B16G16R16
 	// ----
 
-	// [1.12] USUNIETE. W 3.3.5 klient trzymal tu wskazniki na wlasne obiekty
-	// shaderow czcionek (00C7D2CC / 00C7D2D0) i Lexara podmieniala w nich
-	// bajtkod. Klient 1.12 nie tworzy zadnych shaderow czcionek - wrapper
-	// 005C17F0 idzie wprost do InitFontIndexBuffer - wiec te globale nie
-	// istnieja. Port ustawia wlasne shadery na urzadzeniu (patrz MSDF.cpp:
-	// BindMsdfShaders / UnbindMsdfShaders).
+	// [1.12] REMOVED. In 3.3.5 the client kept pointers to its own font shader
+	// objects here (00C7D2CC / 00C7D2D0) and Lexara swapped their bytecode. The
+	// 1.12 client creates no font shaders at all - the wrapper at 005C17F0 goes
+	// straight to InitFontIndexBuffer - so those globals do not exist. The port
+	// sets its own shaders on the device instead (see MSDF.cpp: BindMsdfShaders /
+	// UnbindMsdfShaders).
 
 	inline FT_Library g_realFtLibrary = nullptr;
 	inline msdfgen::FreetypeHandle* g_msdfFreetype = nullptr;
@@ -72,10 +74,10 @@ namespace MSDF {
     inline constexpr uint32_t MAX_ATLAS_PAGES = 4;
     inline constexpr size_t CJK_CACHE_THRESHOLD = 16661;
 
-	// [1.12] Wlacznik renderera na zywo, przelaczany skrotem CTRL+ALT+F
-	// (obsluga w D3D.cpp, w haku EndScene). Sluzy do porownania "przed/po"
-	// bez restartu gry. Sprawdzany we wszystkich pieciu miejscach, ktore
-	// odrozniaja sciezke MSDF od potoku stalego klienta.
+	// [1.12] The renderer switch, flipped with the CTRL+ALT+F shortcut (handled in
+	// D3D.cpp, inside the EndScene hook). It exists for before/after comparisons.
+	// Checked in all five places that tell the MSDF path apart from the client's
+	// fixed pipeline.
 	inline bool ENABLED = true;
 
 	inline bool IS_CJK = false;
@@ -129,11 +131,11 @@ namespace MSDF {
 
     void initialize();
 
-    // Odczyt jednej flagi z lexara112.cfg, wystawiony dla latek spoza tego
-    // pliku (TexNullFill). Wolac dopiero po MSDF::initialize(), bo to ono
-    // wczytuje plik; wczesniej kazda flaga odpowie "wlaczona".
+    // Reads a single flag from lexara112.cfg, exposed for patches outside this
+    // file (TexNullFill). Call it only after MSDF::initialize(), because that is
+    // what loads the file; before that every flag answers "enabled".
     bool CfgFlag(const char* key);
 
-    // Jak wyzej, ale brak pliku albo brak klucza = WYLACZONE.
+    // As above, but a missing file or a missing key means DISABLED.
     bool CfgFlagOptIn(const char* key);
 };

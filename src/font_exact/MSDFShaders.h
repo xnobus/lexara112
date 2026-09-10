@@ -36,9 +36,9 @@ inline auto* vertexShaderHLSL = R"(
 	}
 )";
 
-// [1.12] Wariant diagnostyczny: sciezka MSDF maluje jednolita magente
-// z pelnym kryciem i NIE dotyka atlasu. Sluzy do rozdzielenia "zla macierz"
-// od "pusty atlas". Wlaczany flaga MSDF_DEBUG_SOLID w MSDF.cpp.
+// [1.12] Diagnostic variant: the MSDF path paints a flat magenta at full opacity
+// and does NOT touch the atlas. It exists to tell "wrong matrix" apart from "empty
+// atlas". Enabled with the MSDF_DEBUG_SOLID flag in MSDF.cpp.
 inline auto* pixelShaderDebugHLSL = R"(
 	sampler2D gameTexture : register(s0);
 	float4 control : register(c220);

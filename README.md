@@ -1,126 +1,134 @@
-# Lexara 1.12 - HD MSDF font renderer na Turtle WoW (twmoa_1171)
+# Lexara 1.12 - HD MSDF font renderer for Turtle WoW (twmoa_1171)
 
-Port renderera czcionek przez atlas MSDF z klienta 3.3.5a na klienta 1.12.
+A port of the MSDF-atlas font renderer from the 3.3.5a client to the 1.12 client.
 
-Oryginal: [Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5)
-Licencja: GPL-3.0 (jak oryginal) - patrz [LICENSE](LICENSE).
+Original: [Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5)
+Licence: GPL-3.0 (same as the original) - see [LICENSE](LICENSE).
 
-**Stan: dziala w grze od 2026-09-09.** Tekst rysuje sie przez atlas MSDF.
+**Status: working in game since 2026-09-09.** Text is drawn through the MSDF atlas.
 
-## Czym ten port rozni sie od oryginalu
+## How this port differs from the original
 
-Trzy rzeczy, ktore trzeba wiedziec, zanim sie tu cokolwiek ruszy:
+Three things to know before touching anything here:
 
-1. **Klient 1.12 nie ma shaderow czcionek w ogole.** 3.3.5 (`006BE230`) tworzy
-   obiekt shadera wierzcholkow i pikseli, zanim wywola `InitFontIndexBuffer`; 1.12
-   (`005C17F0`) zaczyna od tego wywolania. `SetVertexShader` nie jest w tej binarce
-   wolane ani razu, a `RenderBatch` ustawia wylacznie stany potoku stalego. Cala
-   warstwa `D3D.cpp` Lexary (haki `IShaderCreate*`, podmiana bajtkodu) nie ma tu
-   odpowiednika - port kompiluje wlasne `vs_3_0`/`ps_3_0` i wiaze je sam.
-2. **Urzadzenie D3D przechwytujemy przez wspoldzielona tablice wirtualna.** Tworzymy
-   wlasne, jednorazowe urzadzenie na ukrytym oknie 8x8, podmieniamy w jego vtable
-   `EndScene` (slot 42) i zwalniamy swoje. Obiekty tej samej klasy C++ dziela vtable,
-   wiec od tej chwili urzadzenie klienta samo sie przedstawia w `this`.
-3. **Ladowanie idzie przez VanillaFixes, nie przez proxy `dinput8.dll`.** Klient
-   1.12 wstrzykuje DLL-e z listy `dlls.txt`, wiec caly proxy (`dllmain.cpp`,
-   `Proxy.cpp`, `dinput8_exports.def` w oryginale) jest tu zbedny - zastepuje go
-   samo `src/dllmain112.cpp`.
+1. **The 1.12 client has no font shaders at all.** 3.3.5 (`006BE230`) creates a
+   vertex and a pixel shader object before calling `InitFontIndexBuffer`; 1.12
+   (`005C17F0`) starts with that call. `SetVertexShader` is not called even once in
+   this binary, and `RenderBatch` sets fixed-pipeline states exclusively. Lexara's
+   entire `D3D.cpp` layer (`IShaderCreate*` hooks, bytecode swapping) has no
+   counterpart here - the port compiles its own `vs_3_0`/`ps_3_0` and binds them
+   itself.
+2. **The D3D device is captured through the shared virtual table.** We create our
+   own throwaway device on a hidden 8x8 window, swap `EndScene` (slot 42) in its
+   vtable and release our own. Objects of the same C++ class share a vtable, so
+   from that moment on the client's device hands itself over in `this`.
+3. **Loading goes through VanillaFixes, not a `dinput8.dll` proxy.** The 1.12
+   client injects the DLLs listed in `dlls.txt`, so the whole proxy layer
+   (`dllmain.cpp`, `Proxy.cpp`, `dinput8_exports.def` in the original) is
+   unnecessary here - `src/dllmain112.cpp` alone replaces it.
 
-Kazda zmiana merytoryczna (nie sam adres) ma w kodzie komentarz `[1.12]`.
+Every substantive change (not a mere address) carries a `[1.12]` comment in the
+code.
 
-## Instalacja
+## Installation
 
-1. Zbudowac (`build.bat`) albo wziac gotowy `lexara112.dll`.
-2. Skopiowac `lexara112.dll` do katalogu klienta.
-3. Dopisac linie `lexara112.dll` do `dlls.txt` obok `WoW.exe`.
-4. Opcjonalnie: `lexara112.cfg.example` -> `lexara112.cfg` w katalogu klienta.
-5. Opcjonalnie: `addon/LexaraCompare` -> `Interface/AddOns/LexaraCompare`.
+1. Build it (`build.bat`) or take a prebuilt `lexara112.dll`.
+2. Copy `lexara112.dll` into the client directory.
+3. Add a `lexara112.dll` line to `dlls.txt` next to `WoW.exe`.
+4. Optional: `lexara112.cfg.example` -> `lexara112.cfg` in the client directory.
+5. Optional: `addon/LexaraCompare` -> `Interface/AddOns/LexaraCompare`.
 
-**Wycofanie:** usunac linie z `dlls.txt`. DLL nie zapisuje niczego w plikach
-klienta - lata pamiec procesu, wiec restart bez wpisu wraca do stanu sprzed.
+**Rollback:** remove the line from `dlls.txt`. The DLL writes nothing into the
+client's files - it patches process memory, so a restart without the entry returns
+to the previous state.
 
-## Obsluga
+## Usage
 
-- **`lexara112.cfg`** - 24 przelaczniki `nazwa=0/1`, brak pliku = wszystko wlaczone.
-  10 miejsc latania (`site_*`), 6 hakow czcionek (`hook_*`), `ft_hooks`, `shaders`,
-  `msdf_enabled`. **Zmiana wymaga tylko restartu gry, nie przebudowy DLL-a** -
-  to narzedzie pierwszego wyboru przy kazdej regresji.
-- **`CTRL+ALT+F11`** - zapisuje `msdf_enabled` do cfg; dziala od nastepnego startu.
-- **`/lexara`** (albo `/lex`) - panel z tym samym tekstem w 9 rozmiarach (8-72 px),
-  pelny zestaw znakow specjalnych; prawy przycisk zmienia kroj.
-- **`lexara112.log`** - log DLL-a, domyslnie oszczedny.
-- Cache glifow: katalog `LEXARA` w `%TEMP%`, mozna kasowac.
+- **`lexara112.cfg`** - 24 switches of the form `name=0/1`; no file = everything
+  enabled. 10 patch sites (`site_*`), 6 font hooks (`hook_*`), `ft_hooks`,
+  `shaders`, `msdf_enabled`. **A change needs only a game restart, not a DLL
+  rebuild** - this is the first tool to reach for on any regression.
+- **`CTRL+ALT+F11`** - writes `msdf_enabled` into the cfg; takes effect on the next
+  start.
+- **`/lexara`** (or `/lex`) - a panel with the same text at 9 sizes (8-72 px) and a
+  full set of special characters; right-click changes the typeface.
+- **`lexara112.log`** - the DLL's log, sparse by default.
+- Glyph cache: the `LEXARA` directory in `%TEMP%`, safe to delete.
 
-## Budowanie
+## Building
 
 ```
 build.bat
 ```
 
-Wymaga **VS 2022 BuildTools** (toolset x86; Community bez toolsetu nie wystarczy)
-i CMake. `build.bat` bierze `cmake` z PATH, a gdy go tam nie ma - ze zmiennej
-`LEXARA_CMAKE`. Wynik: `build/out/Release/lexara112.dll`.
+Requires **VS 2022 BuildTools** (the x86 toolset; Community without the toolset is
+not enough) and CMake. `build.bat` takes `cmake` from PATH, and when it is not
+there, from the `LEXARA_CMAKE` variable. Result:
+`build/out/Release/lexara112.dll`.
 
-## Zaleznosci
+## Dependencies
 
-`third_party/` jest wendorowane w repo (oryginalna Lexara ich nie dolacza):
+`third_party/` is vendored in this repository (the original Lexara does not bundle
+it):
 
-| katalog | zrodlo | uwagi |
+| directory | source | notes |
 |---|---|---|
-| `freetype-2.14.1` | github.com/freetype/freetype, tag `VER-2-14-1` | wersja, ktorej uzywa Lexara |
-| `msdfgen` | github.com/Chlumsky/msdfgen | SVG i PNG **wylaczone** (ciagna tinyxml2/libpng) |
-| `Detours` | github.com/microsoft/Detours | dodane: `CMakeLists.txt` i forwarder `detours.h` |
-| `unordered_dense_src` | github.com/martinus/unordered_dense | tylko naglowek |
+| `freetype-2.14.1` | github.com/freetype/freetype, tag `VER-2-14-1` | the version Lexara uses |
+| `msdfgen` | github.com/Chlumsky/msdfgen | SVG and PNG **disabled** (they pull in tinyxml2/libpng) |
+| `Detours` | github.com/microsoft/Detours | added: `CMakeLists.txt` and a `detours.h` forwarder |
+| `unordered_dense_src` | github.com/martinus/unordered_dense | header only |
 
-**msdfgen bez Skii** nie ma `resolveShapeGeometry`; zastapione w
-`src/font_exact/MSDFCompat.h` tym samym, czym zastepuje to sam msdfgen
+**msdfgen without Skia** has no `resolveShapeGeometry`; it is replaced in
+`src/font_exact/MSDFCompat.h` with the same thing msdfgen itself uses in its place
 (`shape.orientContours()`, `main.cpp:1155`).
 
-## Zmienione pliki Lexary
+## Modified Lexara files
 
-Wersje wyjsciowe tych plikow sa w repozytorium oryginalu
+The starting versions of these files are in the original's repository
 ([Stormhand-dev/Lexara](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5));
-pelny diff portu siedzi w historii gita.
+the full diff of the port lives in the git history.
 
-- `src/font_exact/GameClient.h` - adresy i konwencje 1.12, uklad `CGxString`,
-  FreeType na `__fastcall`.
-- `src/font_exact/MSDF.cpp` - dziesiec miejsc latania, cztery stuby `naked`,
-  `BindMsdfShaders`/`UnbindMsdfShaders`, haki FreeType na `__fastcall`.
-- `src/font_exact/D3D.cpp` - warstwa urzadzenia przepisana: zamiast siedmiu hakow
-  `CGxDevice` lancuch `LoadLibrary -> Direct3DCreate9 -> CreateDevice`.
-- `src/font_exact/MSDF.h` - usuniete globale shaderow czcionek.
-- `src/font_exact/MSDFValidator.h`, `MSDFFont.cpp` - `MSDFCompat::ResolveShapeGeometry`.
+- `src/font_exact/GameClient.h` - 1.12 addresses and conventions, the `CGxString`
+  layout, FreeType on `__fastcall`.
+- `src/font_exact/MSDF.cpp` - ten patch sites, four `naked` stubs,
+  `BindMsdfShaders`/`UnbindMsdfShaders`, FreeType hooks on `__fastcall`.
+- `src/font_exact/D3D.cpp` - the device layer rewritten: instead of seven
+  `CGxDevice` hooks, the chain `LoadLibrary -> Direct3DCreate9 -> CreateDevice`.
+- `src/font_exact/MSDF.h` - font shader globals removed.
+- `src/font_exact/MSDFValidator.h`, `MSDFFont.cpp` -
+  `MSDFCompat::ResolveShapeGeometry`.
 
-## Dokumentacja
+## Documentation
 
-- [`docs/lexara.md`](docs/lexara.md) - komplet wiedzy: stan, obsluga, pulapki,
-  siedem usterek znalezionych dopiero w grze.
-- [`docs/lexara-port-mapa.md`](docs/lexara-port-mapa.md) - **adresy 1.12, uklad
-  struktur, konwencje wywolan, przebieg etapow 1-5.** Zaczac tutaj przy kazdej
-  pracy nad haczeniem klienta.
-- [`docs/README-portu-etap-pierwszy-test.md`](docs/README-portu-etap-pierwszy-test.md) -
-  README z chwili przed pierwszym uruchomieniem; historyczny, ale trzyma liste
-  rzeczy, ktorych nie dalo sie rozstrzygnac statycznie.
+- [`docs/lexara.md`](docs/lexara.md) - everything worth knowing: status, usage,
+  pitfalls, the seven bugs that only showed up in game.
+- [`docs/lexara-port-map.md`](docs/lexara-port-map.md) - **1.12 addresses,
+  structure layouts, calling conventions, the course of stages 1-5.** Start here
+  for any work on hooking the client.
+- [`docs/README-port-first-test.md`](docs/README-port-first-test.md) - the README
+  as it stood just before the first launch; historical, but it holds the list of
+  things that could not be settled statically.
 
-## Zglaszanie bledow
+## Reporting bugs
 
-W zgloszeniu podac:
+Please include:
 
-1. **`lexara112.log`** - w calosci, jest krotki.
-2. **`lexara112.cfg`** - albo informacje, ze pliku nie ma.
-3. **Wersje klienta** i liste z `dlls.txt` (kolejnosc ma znaczenie).
-4. **Wynik bisekcji przez cfg**: wylaczyc `msdf_enabled`, potem `shaders`, potem
-   `ft_hooks`, potem `site_*` grupami. Ktory przelacznik usuwa objaw - to jest
-   polowa diagnozy i nie wymaga przebudowy DLL-a.
-5. Przy crashu: zawartosc `Errors/` klienta i log DXVK (`*_d3d9.log`).
+1. **`lexara112.log`** - in full, it is short.
+2. **`lexara112.cfg`** - or a note that the file is absent.
+3. **The client version** and the list from `dlls.txt` (the order matters).
+4. **The result of bisecting through the cfg**: disable `msdf_enabled`, then
+   `shaders`, then `ft_hooks`, then the `site_*` entries in groups. Which switch
+   removes the symptom is half the diagnosis and needs no DLL rebuild.
+5. On a crash: the contents of the client's `Errors/` directory and the DXVK log
+   (`*_d3d9.log`).
 
-## Pulapki (skrot)
+## Pitfalls (short version)
 
-- **`commit = 0` z Detours znaczy "brak bledu", NIE "hak dziala".** Jedyna sonda
-  na dzialanie haka to log z jego wnetrza.
-- **Przy stubie asemblerowym sprawdzac ZYWE REJESTRY**, nie tylko dlugosc miejsca
-  i adres powrotu - 3.3.5 i 1.12 potrafia prowadzic ten sam lancuch przez inny
-  rejestr, a kontrola dlugosci tego nie wylapie.
-- Miejsce `ProcessBatch` (`005C91A8`) ma dokladnie 5 bajtow i jest CELEM skoku
-  `je 005C91A9` z `005C8FF3` - wejscie w ten skok po zalataniu to skok w srodek
-  instrukcji.
+- **`commit = 0` from Detours means "no error", NOT "the hook works".** The only
+  probe for whether a hook works is a log line from inside it.
+- **With an assembly stub, check the LIVE REGISTERS**, not just the site length and
+  the return address - 3.3.5 and 1.12 can run the same chain through a different
+  register, and a length check will not catch that.
+- The `ProcessBatch` site (`005C91A8`) is exactly 5 bytes long and is the TARGET of
+  the `je 005C91A9` jump from `005C8FF3` - taking that jump after the patch means
+  jumping into the middle of an instruction.

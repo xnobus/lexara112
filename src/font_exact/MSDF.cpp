@@ -17,21 +17,21 @@ namespace {
     IDirect3DPixelShader9* s_cachedPS = nullptr;
     IDirect3DVertexShader9* s_cachedVS = nullptr;
 
-    // [1.12] Definicje nizej, przy CGxuFontRenderBatchHk; WriteGeometryHk stoi
-    // wyzej w pliku i wola je pierwszy.
+    // [1.12] Defined further down, next to CGxuFontRenderBatchHk; WriteGeometryHk
+    // sits higher up in the file and is the first to call them.
     void BindMsdfShaders(IDirect3DDevice9* device);
     void UnbindMsdfShaders(IDirect3DDevice9* device);
 
     // ------------------------------------------------------------------
-    // [1.12] Przelaczniki z pliku `lexara112.cfg` obok klienta.
+    // [1.12] Switches read from the `lexara112.cfg` file next to the client.
     //
-    // Powod: kazda hipoteza "ktora latka psuje tekst" kosztowala dotad
-    // przebudowe + wejscie do gry. Z tym plikiem bisekcje robi sie samym
-    // edytorem tekstu. Format: jedna linia `nazwa=0` albo `nazwa=1`,
-    // linie z `#` pomijane. Brak pliku = wszystko wlaczone (zachowanie
-    // domyslne portu).
+    // Why: every hypothesis of the form "which patch breaks the text" used to cost
+    // a rebuild plus a trip into the game. With this file the bisection is done in
+    // a text editor. Format: one line per entry, `name=0` or `name=1`; lines
+    // starting with `#` are skipped. No file = everything enabled (the port's
+    // default behaviour).
     //
-    // Nazwy odpowiadaja miejscom latania z _lexara-port-mapa.md:
+    // The names match the patch sites from lexara-port-map.md:
     //   site_initbuf   site_allocbuf  site_checkgeom  site_checkcall
     //   site_bufstream site_bufalloc1 site_bufalloc2  site_bufalloc3
     //   site_procbatch site_glyphy
@@ -64,7 +64,7 @@ namespace {
 
         FILE* f = nullptr;
         if (fopen_s(&f, path, "rb") != 0 || !f) {
-            Log("[MSDF] brak lexara112.cfg - wszystkie latki WLACZONE");
+            Log("[MSDF] no lexara112.cfg - all patches ENABLED");
             return;
         }
         char buf[4096];
@@ -75,13 +75,13 @@ namespace {
         Log("[MSDF] wczytano lexara112.cfg (%u B)", (unsigned)n);
     }
 
-    // [1.12] Straznice sond - kazda sonda ma wypisac sie RAZ. Bez tego log
-    // rosnie z kazda klatka i sam staje sie problemem wydajnosciowym.
+    // [1.12] Probe guards - each probe is meant to report exactly ONCE. Without
+    // them the log grows with every frame and becomes a performance problem itself.
     bool g_logBind = false, g_logWrite = false, g_logFont = false;
 
-    // [1.12] Dziesiec miejsc latania. Adresy z etapu 1 (_lexara-port-mapa.md),
-    // w komentarzu odpowiednik 3.3.5. Kazde ma w 1.12 tyle samo albo wiecej bajtow
-    // niz detour, wiec zaden nie wymagal przesuwania granicy.
+    // [1.12] Ten patch sites. Addresses from stage 1 (lexara-port-map.md); the
+    // 3.3.5 counterpart is in the trailing comment. In 1.12 each site has at least
+    // as many bytes as the detour needs, so none required moving the boundary.
     auto(*CGxString__CheckGeometry_call)() = reinterpret_cast<void(*)()>(0x005C9019);          // 006C4B09
     constexpr uintptr_t CGxString__CheckGeometry_call_jmpback = 0x005C9020;                    // 006C4B10
 
@@ -97,10 +97,11 @@ namespace {
     auto(*CGxDevice__InitFontIndexBuffer_site)() = reinterpret_cast<void(*)()>(0x005C92F7);    // 006C47BD
     constexpr uintptr_t CGxDevice__InitFontIndexBuffer_site_jmpback = 0x005C930F;              // 006C47D8
 
-    // UWAGA (R1): te 5 bajtow jest rowniez celem skoku `je 005C91A9` z 005C8FF3
-    // (wczesne wyjscie, gdy bufor indeksow nie jest zainicjowany) - wejscie w ten
-    // skok po zalataniu to skok w srodek instrukcji. Tak samo bylo w 3.3.5;
-    // gwarancja jest hak Init, ktory nie pozwala wskaznikowi bufora byc zerem.
+    // NOTE (R1): these 5 bytes are also the target of the `je 005C91A9` jump from
+    // 005C8FF3 (an early exit taken when the index buffer is not initialised) -
+    // taking that jump after the patch means jumping into the middle of an
+    // instruction. It was the same in 3.3.5; the guarantee is the Init hook, which
+    // never lets the buffer pointer be null.
     auto(*IGxuFontProcessBatch_site)() = reinterpret_cast<void(*)()>(0x005C91A8);              // 006C4CC4
     constexpr uintptr_t IGxuFontProcessBatch_site_jmpback = 0x005C91AD;                        // 006C4CC9
 
@@ -121,8 +122,8 @@ namespace {
 
     void __cdecl PrefetchCodepoints(CGxString* pThis) {
         if (s_prefetchPayload.empty()) return;
-        // [1.12] Bez urzadzenia nie ma atlasu, wiec prefetch tylko wygenerowalby
-        // glify, ktorych nie ma gdzie zapisac. Odkladamy je na pozniej.
+        // [1.12] With no device there is no atlas, so a prefetch would only
+        // generate glyphs with nowhere to store them. We defer them instead.
         if (!D3D::GetDevice()) return;
         if (!pThis || reinterpret_cast<uintptr_t>(pThis) & 1) return;
 
@@ -140,16 +141,16 @@ namespace {
         if (!(pThis->m_flags & 0x40000000)) return;
         if (!MSDF::ENABLED) return;
 
-        // [1.12] Bez urzadzenia nie da sie utworzyc strony atlasu
-        // (D3D::CreateTexture odbija na "if (!device) return false"), a kazdy
-        // glif dotkniety w tym czasie konczyl jako odrzucony. Log pokazywal
-        // "CreateAtlasPage: ODMOWIL (stron dotad=0)" bez zadnego HRESULT-u,
-        // czyli porazke PRZED wywolaniem device->CreateTexture.
+        // [1.12] Without a device an atlas page cannot be created
+        // (D3D::CreateTexture bails out on "if (!device) return false"), and every
+        // glyph touched during that window ended up rejected. The log showed
+        // "CreateAtlasPage: REFUSED (pages so far=0)" with no HRESULT at all,
+        // i.e. a failure BEFORE device->CreateTexture was ever called.
         //
-        // Ta funkcja leci z CheckGeometry, czyli podczas ukladania tekstu,
-        // ktore potrafi wyprzedzic pierwsza klatke klienta - a urzadzenie
-        // lapiemy dopiero na jego EndScene. Odkladamy wiec robote na pozniej;
-        // klient i tak przeliczy geometrie w kolejnej klatce.
+        // This function runs from CheckGeometry, i.e. during text layout, which can
+        // get ahead of the client's first frame - and we only catch the device on
+        // its EndScene. So we defer the work; the client recomputes the geometry in
+        // the next frame anyway.
         if (!D3D::GetDevice()) return;
 
         MSDFFont* fontHandle = MSDF::ENABLED ? MSDFFont::Get(pThis->GetFontFace()) : nullptr;
@@ -244,10 +245,11 @@ namespace {
 
         MSDFFont* fontHandle = MSDFFont::Get(pThis->GetFontFace());
 
-        // [1.12] Sonda rozdzielajaca: RenderGlyph czcionke ROZPOZNAJE (widac to po
-        // przesunieciu w pionie), a WriteGeometry nie. Roznica jest tylko taka, ze
-        // RenderGlyph dostaje FT_Face w argumencie, a tu idzie ono przez
-        // m_fontObj (+0x44) -> m_ftWrapper (+0x70) -> GetFontFace (005D0370).
+        // [1.12] A discriminating probe: RenderGlyph DOES recognise the font (it
+        // shows in the vertical offset) while WriteGeometry does not. The only
+        // difference is that RenderGlyph receives the FT_Face as an argument, while
+        // here it comes through m_fontObj (+0x44) -> m_ftWrapper (+0x70) ->
+        // GetFontFace (005D0370).
         if (!g_logWrite) {
             g_logWrite = true;
             CGxFont* fo = pThis->m_fontObj;
@@ -261,7 +263,7 @@ namespace {
                 constexpr float resetControl[4] = { 0, 0, 0, 0 };
                 device->SetPixelShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
                 device->SetVertexShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
-                // [1.12] Czcionka nieobslugiwana przez MSDF - wracamy na potok staly.
+                // [1.12] Font not handled by MSDF - fall back to the fixed pipeline.
                 UnbindMsdfShaders(device);
             }
             return;
@@ -270,14 +272,14 @@ namespace {
         IDirect3DDevice9* device = D3D::GetDevice();
         if (!device) {
             static bool logged = false;
-            if (!logged) { logged = true; Log("[MSDF] WriteGeometry: BRAK URZADZENIA - sciezka MSDF nieaktywna"); }
+            if (!logged) { logged = true; Log("[MSDF] WriteGeometry: NO DEVICE - the MSDF path is inactive"); }
             return;
         }
 
         if (!g_logWrite) {
             g_logWrite = true;
             CGxFontGeomBatch* b0 = pThis->m_geomBuffers[0];
-            Log("[MSDF] pierwszy WriteGeometry z czcionka MSDF: batch=%p verts=%u",
+            Log("[MSDF] first WriteGeometry with an MSDF font: batch=%p verts=%u",
                 b0, b0 ? b0->m_verts.m_count : 0u);
             if (b0 && b0->m_verts.m_data && b0->m_verts.m_count >= 4) {
                 CGxFontVertex* v = b0->m_verts.m_data;
@@ -293,18 +295,18 @@ namespace {
             if (!logged) {
                 logged = true;
                 const uint32_t pages = fontHandle->GetAtlasPageCount();
-                Log("[MSDF] atlas: stron=%u", pages);
+                Log("[MSDF] atlas: pages=%u", pages);
                 for (uint32_t i = 0; i < pages; ++i) {
                     auto* ap = fontHandle->GetAtlasPage(i);
-                    Log("       strona %u: wpis=%p tekstura=%p", i, ap, ap ? ap->texture : nullptr);
+                    Log("       page %u: entry=%p texture=%p", i, ap, ap ? ap->texture : nullptr);
                 }
                 const uint32_t flags = pThis->m_fontObj->m_atlasPages[0].m_flags;
-                Log("[MSDF] flagi czcionki=0x%08X -> control.y=%.1f (0=bez obwodki, 1/2=obwodka)",
+                Log("[MSDF] font flags=0x%08X -> control.y=%.1f (0=no outline, 1/2=outline)",
                     flags, (double)((flags & 8) ? 2.0f : ((flags & 1) ? 1.0f : 0.0f)));
             }
         }
 
-        // [1.12] Tu, a nie w haku klienta - patrz komentarz przy BindMsdfShaders.
+        // [1.12] Here, not in a client hook - see the comment at BindMsdfShaders.
         BindMsdfShaders(device);
 
         for (uint32_t pageIdx = 0; pageIdx < fontHandle->GetAtlasPageCount(); ++pageIdx) {
@@ -332,31 +334,31 @@ namespace {
     }
 
     // ------------------------------------------------------------------
-    // [1.12] Wiazanie shaderow. Klient 1.12 rysuje tekst potokiem STALYM -
-    // nie ma obiektu shadera czcionek, ktoremu mozna podmienic bajtkod.
-    // Ustawiamy wiec wlasne shadery na urzadzeniu przed rysowaniem partii
-    // i zdejmujemy je po, zeby reszta interfejsu wrocila na potok staly.
+    // [1.12] Shader binding. The 1.12 client draws text with the FIXED pipeline -
+    // there is no font shader object whose bytecode could be swapped. So we set
+    // our own shaders on the device before drawing a batch and take them off
+    // afterwards, so that the rest of the interface returns to the fixed pipeline.
     //
-    // Poniewaz vs_3_0 zastepuje transformacje potoku stalego, macierz
-    // World*View*Projection trzeba podac samemu w c0..c3. Klient ustawia te
-    // trzy macierze normalnie, wiec czytamy je z urzadzenia.
+    // Because vs_3_0 replaces the fixed-pipeline transform, the
+    // World*View*Projection matrix has to be supplied by hand in c0..c3. The client
+    // sets those three matrices normally, so we read them back from the device.
     // ------------------------------------------------------------------
 
-    // Przy `mul(pos, WorldViewProj)` w HLSL i domyslnym pakowaniu kolumnowym
-    // macierz podaje sie TRANSPONOWANA. To jedyne miejsce w porcie, ktorego
-    // nie dalo sie rozstrzygnac statycznie - przy pierwszym tescie w grze
-    // objawem zlego wyboru jest tekst poza ekranem albo niewidoczny.
-    // Wtedy: zmienic te stala na false i zbudowac ponownie.
+    // With `mul(pos, WorldViewProj)` in HLSL and the default column-major packing,
+    // the matrix has to be handed over TRANSPOSED. This is the one place in the
+    // port that could not be settled statically - on the first in-game test the
+    // symptom of the wrong choice is text off-screen or invisible.
+    // In that case: flip this constant to false and rebuild.
     constexpr bool MSDF_WVP_TRANSPOSE = true;
 
-    // [1.12] DIAGNOSTYKA. Rozdziela dwie rozne przyczyny "nie widac tekstu":
-    //   - geometria trafia poza ekran (zla macierz WVP), albo
-    //   - geometria jest dobra, ale atlas jest pusty, wiec sd = 0 i krycie = 0.
-    // Przy MSDF_DEBUG_SOLID pixel shader maluje sciezke MSDF na jednolita
-    // magente z pelnym kryciem, calkowicie pomijajac atlas. Wtedy:
-    //   widac magentowe prostokaty w miejscach tekstu -> geometria OK, wina atlasu
-    //   nie widac nic                                  -> wina macierzy/geometrii
-    // Ustawic z powrotem na false po rozstrzygnieciu.
+    // [1.12] DIAGNOSTIC. Separates two different causes of "no text visible":
+    //   - the geometry lands off-screen (wrong WVP matrix), or
+    //   - the geometry is fine but the atlas is empty, so sd = 0 and opacity = 0.
+    // With MSDF_DEBUG_SOLID the pixel shader paints the MSDF path a flat magenta at
+    // full opacity, bypassing the atlas entirely. Then:
+    //   magenta rectangles where the text should be -> geometry OK, atlas at fault
+    //   nothing at all                              -> matrix/geometry at fault
+    // Set it back to false once the question is settled.
     constexpr bool MSDF_DEBUG_SOLID = false;
 
 
@@ -371,12 +373,12 @@ namespace {
         }
     }
 
-    // [1.12] Shadery kompilujemy LENIWIE, przy pierwszym uzyciu.
-    // Pierwsza wersja portu robila to w FreeType_InitHk, czyli przy
-    // inicjalizacji czcionek - a to leci ZANIM istnieje urzadzenie D3D,
-    // wiec D3DCompile dostawalo null i obie zmienne zostawaly zerami
-    // (log: "shadery: vs=00000000 ps=00000000"). W 3.3.5 problemu nie bylo,
-    // bo tam shadery wchodzily przez callbacki klienta, odpalane pozniej.
+    // [1.12] Shaders are compiled LAZILY, on first use.
+    // The first version of the port did it in FreeType_InitHk, i.e. during font
+    // initialisation - and that runs BEFORE a D3D device exists, so D3DCompile got
+    // a null and both variables stayed zero (log: "shaders: vs=00000000
+    // ps=00000000"). In 3.3.5 the problem did not arise, because there the shaders
+    // came in through client callbacks, which fire later.
     void EnsureShaders(IDirect3DDevice9* device) {
         if (!device || (s_cachedVS && s_cachedPS)) return;
         if (!CfgOn("shaders")) return;
@@ -434,21 +436,21 @@ namespace {
 
         if (!g_logBind) {
             g_logBind = true;
-            // [1.12] Rejestry lezace ponad zakresem klienta (patrz MSDF.h). Jesli
-            // sterownik zglosi tu blad, znaczy ze urzadzenie ma mniej stalych
-            // niz vs_3_0 - wtedy trzeba zejsc nizej, ale nadal ponad c186.
+            // [1.12] Registers above the client's range (see MSDF.h). If the driver
+            // reports an error here it means the device has fewer constants than
+            // vs_3_0 requires - then we have to move lower, but still above c186.
             D3DCAPS9 caps{};
             device->GetDeviceCaps(&caps);
-            Log("[MSDF] stale: WorldViewProj -> c%u..c%u (hr=0x%08lX), control -> c%u."
-                " MaxVertexShaderConst urzadzenia = %lu",
+            Log("[MSDF] constants: WorldViewProj -> c%u..c%u (hr=0x%08lX), control -> c%u."
+                " Device MaxVertexShaderConst = %lu",
                 MSDF::SDF_WVP_REG, MSDF::SDF_WVP_REG + 3, hrWvp,
                 MSDF::SDF_CONTROL_REG, caps.MaxVertexShaderConst);
             if (FAILED(hrWvp) || caps.MaxVertexShaderConst < MSDF::SDF_WVP_REG + 4) {
-                Log("[MSDF] UWAGA: urzadzenie ma za malo rejestrow stalych na nasz uklad."
-                    " Tekst bedzie zle transformowany. Zejsc z SDF_WVP_REG w MSDF.h,"
-                    " ale nie nizej niz ponad zakres klienta (zmierzone: do c198).");
+                Log("[MSDF] WARNING: the device has too few constant registers for our layout."
+                    " Text will be transformed incorrectly. Lower SDF_WVP_REG in MSDF.h,"
+                    " but no lower than just above the client range (measured: up to c198).");
             }
-            Log("[MSDF] pierwszy bind. WVP (po ewentualnej transpozycji):");
+            Log("[MSDF] first bind. WVP (after transposition, if any):");
             Log("       %8.3f %8.3f %8.3f %8.3f", c[0], c[1], c[2], c[3]);
             Log("       %8.3f %8.3f %8.3f %8.3f", c[4], c[5], c[6], c[7]);
             Log("       %8.3f %8.3f %8.3f %8.3f", c[8], c[9], c[10], c[11]);
@@ -468,13 +470,14 @@ namespace {
             constexpr float resetControl[4] = { 0, 0, 0, 0 };
             device->SetPixelShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
             device->SetVertexShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
-            // [1.12] Obowiazkowe: bez tego reszta interfejsu rysowalaby sie
-            // naszym shaderem czcionek. W 3.3.5 klient przestawial shader sam.
+            // [1.12] Mandatory: without this the rest of the interface would be
+            // drawn with our font shader. In 3.3.5 the client switched the shader
+            // back itself.
             UnbindMsdfShaders(device);
         }
     }
 
-    // [1.12] __fastcall, nie __cdecl - klient podaje face w ECX, fontSize w EDX.
+    // [1.12] __fastcall, not __cdecl - the client passes face in ECX, fontSize in EDX.
     char __fastcall GxuFontGlyphRenderGlyphHk(FT_Face fontFace, uint32_t fontSize, uint32_t codepoint, uint32_t pageInfo, CGxGlyphMetrics* resultBuffer, uint32_t outline_flag, uint32_t pad) {
         const char result = CGxuFont::RenderGlyph(fontFace, fontSize, codepoint, pageInfo, resultBuffer, outline_flag, pad);
         if (!g_logFont) {
@@ -483,25 +486,25 @@ namespace {
                 fontFace, MSDFFont::Get(fontFace), codepoint);
         }
         if (MSDF::ENABLED && resultBuffer && MSDFFont::Get(fontFace)) {
-            // [1.12] m_bearingY i m_verAdv sa BEZ ZNAKU. Dla znakow o malym
-            // wyniesieniu nad linie bazowa (kropka, myslnik, przecinek)
-            // wyniesienie jest MNIEJSZE od odstepu pionowego, wiec odejmowanie
-            // zawijalo sie na wartosc rzedu miliardow. Czworokat takiego znaku
-            // dostawal wtedy y ~ 1.77e7 i ladowal daleko poza ekranem, podczas
-            // gdy np. 'm' w tej samej partii miala poprawne y = -31..-12.
-            // Zmierzone sonda porownawcza, nie wydedukowane.
-            // [1.12] Odejmowanie BEZ przycinania - wynik ujemny jest tu poprawny.
+            // [1.12] m_bearingY and m_verAdv are UNSIGNED. For characters with a
+            // small rise above the baseline (period, hyphen, comma) the bearing is
+            // SMALLER than the vertical advance, so the subtraction wrapped around
+            // to a value in the billions. The quad for such a character then got
+            // y ~ 1.77e7 and landed far off-screen, while e.g. 'm' in the same batch
+            // had a correct y = -31..-12.
+            // Measured with a comparison probe, not deduced.
+            // [1.12] Subtraction WITHOUT clamping - a negative result is correct here.
             //
-            // Probowalem przycinac do zera, gdy wyniesienie bylo mniejsze od
-            // odstepu pionowego, bo znaki '.', '-' i '_' dostawaly wtedy y rzedu
-            // 1.8e7. Bylo to leczenie objawu CUDZEJ usterki: prawdziwa przyczyna
-            // siedziala w stubie GetGlyphYMetrics, ktory nadpisywal EDX zywy
-            // w 1.12. Po jego naprawie przycinanie samo stalo sie bledem -
-            // sprowadzalo wyniesienie tych znakow do zera, czyli sadzalo je przy
-            // GORNEJ krawedzi wiersza. Pomiar: przy wylaczonym haku wszystkie
-            // litery sa zle ustawione, wiec odejmowanie jest konieczne; wartosc
-            // czyta klient ZE ZNAKIEM, a znak ponizej linii bazowej ma miec
-            // wyniesienie ujemne.
+            // Clamping to zero when the bearing was smaller than the vertical
+            // advance was tried, because '.', '-' and '_' were getting y around
+            // 1.8e7. That was treating the symptom of SOMEONE ELSE'S bug: the real
+            // cause sat in the GetGlyphYMetrics stub, which clobbered an EDX that
+            // is live in 1.12. Once that was fixed the clamping became a bug in its
+            // own right - it drove those characters' bearing to zero, i.e. planted
+            // them against the TOP edge of the line. Measurement: with the hook
+            // disabled every letter is misplaced, so the subtraction is necessary;
+            // the client reads the value AS SIGNED, and a character below the
+            // baseline is supposed to have a negative bearing.
             resultBuffer->m_bearingY -= resultBuffer->m_verAdv;
         }
         return result;
@@ -576,20 +579,20 @@ namespace {
         }
     }
 
-    // [1.12] Wolane ze stuba asemblerowego GetGlyphYMetrics. Gdy renderer jest
-    // wylaczony, udajemy "to nie jest czcionka MSDF" - dzieki temu jedno
-    // sprawdzenie wylacza takze latke asemblerowa, ktorej nie da sie odpiac.
+    // [1.12] Called from the GetGlyphYMetrics assembly stub. When the renderer is
+    // disabled we pretend "this is not an MSDF font" - that way a single check also
+    // disables the assembly patch, which cannot be detached.
     bool __cdecl MSDFFont_Get(FT_Face face) { return MSDF::ENABLED && MSDFFont::Get(face); }
-    // [1.12] Stub przepisany na rejestry, ktorych naprawde uzywa 1.12.
+    // [1.12] Stub rewritten for the registers 1.12 actually uses.
     //
-    // 3.3.5 (006C8C71):  mov edx,[ecx+54h] / mov ecx,[edx+68h]  - lancuch przez EDX
-    // 1.12  (005D137A):  mov ecx,[ecx+54h] / mov ecx,[ecx+68h]  - lancuch przez ECX
+    // 3.3.5 (006C8C71):  mov edx,[ecx+54h] / mov ecx,[edx+68h]  - chain through EDX
+    // 1.12  (005D137A):  mov ecx,[ecx+54h] / mov ecx,[ecx+68h]  - chain through ECX
     //
-    // Przeniesiona doslownie wersja z 3.3.5 nadpisywala EDX, ktory w 1.12 jest
-    // w tym miejscu ZYWY i wyzerowany (005D136B "mov [ebp-4],edx",
-    // 005D136F "xor edx,edx"). Klient liczyl potem z tego smiecia, przez co
-    // czesc znakow dostawala absurdalna wspolrzedna pionowa i znikala z ekranu.
-    // Teraz EDX nie jest ruszany, a lancuch idzie przez ECX jak w oryginale.
+    // The version carried over verbatim from 3.3.5 clobbered EDX, which at this
+    // point in 1.12 is LIVE and zeroed (005D136B "mov [ebp-4],edx",
+    // 005D136F "xor edx,edx"). The client then computed from that garbage, which is
+    // why some characters got an absurd vertical coordinate and vanished off-screen.
+    // EDX is now left alone and the chain goes through ECX, as in the original.
     __declspec(naked) void CGxString_GetGlyphYMetrics_siteHk() {
         __asm {
             pushad;
@@ -608,18 +611,18 @@ namespace {
         }
     }
 
-    // [1.12] licznikiem petli jest EDI, nie EBX. Miejsce ma 5 bajtow,
-    // `mov edi, imm32` tez ma 5 - wchodzi bez przesuwania granicy.
+    // [1.12] the loop counter is EDI, not EBX. The site is 5 bytes and
+    // `mov edi, imm32` is 5 as well - it fits without moving the boundary.
     __declspec(naked) void CGxDevice__AllocateFontIndexBuffer_siteHk() {
         __asm {
             mov edi, 3FFFh;
             jmp CGxDevice__AllocateFontIndexBuffer_site_jmpback;
         }
     }
-    // [1.12] Dwie zmiany merytoryczne wobec 3.3.5:
-    //  - znika `mov ecx,[00C5DF88]` - w 1.12 nie ma globalu CGxDevice,
-    //    PoolCreate to wolna funkcja, a nie metoda urzadzenia;
-    //  - dwa pierwsze argumenty ida w ECX/EDX, rozmiar zostaje na stosie.
+    // [1.12] Two substantive changes relative to 3.3.5:
+    //  - `mov ecx,[00C5DF88]` is gone - 1.12 has no CGxDevice global, and
+    //    PoolCreate is a free function rather than a device method;
+    //  - the first two arguments go in ECX/EDX, the size stays on the stack.
     __declspec(naked) void CGxDevice__InitFontIndexBuffer_siteHk() {
         __asm {
             push 30000h;
@@ -658,9 +661,9 @@ namespace {
             jmp CGxDevice__BufStream_site_jmpback;
         }
     }
-    // [1.12] Tablica partii tekstur jest przesunieta o -0x14, wiec granica
-    // petli to 0A0h, nie 0B4h. EAX musi wyjsc wyzerowany: jmpback w 1.12
-    // wpisuje go do [ebp-0Ch] i [ebp-18h] (3.3.5 wpisywalo tam stala 0).
+    // [1.12] The texture batch array is shifted by -0x14, so the loop bound is
+    // 0A0h, not 0B4h. EAX has to come out zeroed: the jmpback in 1.12 writes it to
+    // [ebp-0Ch] and [ebp-18h] (3.3.5 wrote a literal 0 there).
     __declspec(naked) void bufalloc_1_siteHk() {
         __asm {
             xor eax, eax;
@@ -669,9 +672,9 @@ namespace {
             jmp bufalloc_1_site_jmpback;
         }
     }
-    // [1.12] bufalloc (005C8F40) to konwencja rejestrowa: ecx = &stream,
-    // edx = rozmiar, sprzata stos sam - zadnego `add esp,8` po wywolaniu.
-    // Lokalna ze strumieniem lezy pod [ebp-1Ch], nie [ebp-18h].
+    // [1.12] bufalloc (005C8F40) uses a register convention: ecx = &stream,
+    // edx = size, and it cleans the stack itself - no `add esp,8` after the call.
+    // The stream local sits at [ebp-1Ch], not [ebp-18h].
     __declspec(naked) void bufalloc_2_siteHk() {
         __asm {
             mov eax, g_runtimeVBSize;
@@ -687,8 +690,8 @@ namespace {
             jmp bufalloc_2_site_jmpback;
         }
     }
-    // [1.12] Tu `lea` na strumien lezy WEWNATRZ latanego zakresu, wiec stub
-    // musi je powtorzyc - w 3.3.5 wskaznik przychodzil gotowy w EAX.
+    // [1.12] Here the `lea` for the stream sits INSIDE the patched range, so the
+    // stub has to repeat it - in 3.3.5 the pointer arrived ready in EAX.
     __declspec(naked) void bufalloc_3_siteHk() {
         __asm {
             mov edx, g_runtimeVBSize;
@@ -708,7 +711,7 @@ namespace {
         if (result != 0 || !aface || !*aface) return result;
 
         MSDFFont::Register(*aface, file_base, file_size);
-        Log("[MSDF] zarejestrowana czcionka: face=%p handle=%p rozmiar=%ld",
+        Log("[MSDF] font registered: face=%p handle=%p size=%ld",
             *aface, MSDFFont::Get(*aface), (long)file_size);
         return result;
     }
@@ -747,36 +750,36 @@ namespace {
         return 0;
     }
 
-    // [1.12] FreeType_NewFaceHk usuniety: FT_New_Face nie zostala znaleziona
-    // w 1.12, bo zaden z dwoch klientow jej nie wola (ryzyko R3 w mapie).
-    // Hak Lexary byl zapobiegawczy.
+    // [1.12] FreeType_NewFaceHk removed: FT_New_Face was not found in 1.12 because
+    // neither of the two clients calls it (risk R3 in the map). Lexara's hook was
+    // precautionary.
 
-    // [1.12] Hak, ktorego Lexara na 3.3.5 nie potrzebowala, a bez ktorego 1.12
-    // wywala sie przy starcie: 0xC0000005 pod 007CECA4 (FT_Add_Module), wolane
-    // z 007CCFDA, czyli ze srodka FT_Add_Default_Modules; ESI wskazywalo tablice
-    // 11 domyslnych modulow (0081E068), a EDI mialo 0x13 - mala liczbe uzyta jako
-    // wskaznik, czyli odczyt spod zlego offsetu w strukturze.
+    // [1.12] A hook Lexara did not need on 3.3.5, and without which 1.12 crashes
+    // at start-up: 0xC0000005 at 007CECA4 (FT_Add_Module), called from 007CCFDA,
+    // i.e. from inside FT_Add_Default_Modules; ESI pointed at the table of 11
+    // default modules (0081E068) while EDI held 0x13 - a small number used as a
+    // pointer, i.e. a read from the wrong offset inside the structure.
     //
-    // Powod: wrapper klienta 005C17F0 robi po kolei
-    //     call FT_New_Library   (nasz hak -> zwraca biblioteke FreeType 2.14.1
-    //                            Lexary, nie te wbudowana w klienta)
-    //     call FT_Add_Default_Modules  (kod FreeType-a Z KLIENTA)
-    // czyli puszcza STARY kod na NOWEJ strukturze FT_LibraryRec. Offsety pol
-    // miedzy tymi wersjami sie roznia.
+    // The reason: the client's wrapper at 005C17F0 does, in order,
+    //     call FT_New_Library   (our hook -> returns Lexara's FreeType 2.14.1
+    //                            library, not the one built into the client)
+    //     call FT_Add_Default_Modules  (the CLIENT'S OWN FreeType code)
+    // i.e. it runs OLD code against a NEW FT_LibraryRec structure. The field
+    // offsets differ between those versions.
     //
-    // Nasz hak Init wola pelne FT_Init_FreeType, ktore jest rownowazne
-    // FT_New_Library + FT_Add_Default_Modules, wiec moduly SA juz dodane -
-    // to wywolanie jest nie tylko szkodliwe, ale i zbedne. Pomijamy je
-    // wylacznie dla NASZEJ biblioteki; sciezka CJK, gdzie oddajemy klientowi
-    // jego wlasna, dziala dalej normalnie.
+    // Our Init hook calls the full FT_Init_FreeType, which is equivalent to
+    // FT_New_Library + FT_Add_Default_Modules, so the modules ARE already added -
+    // this call is not merely harmful but redundant. We skip it only for OUR OWN
+    // library; the CJK path, where the client gets its own library back, keeps
+    // working as before.
     void __fastcall FreeType_AddDefaultModulesHk(FT_Library library) {
         if (library && library == MSDF::g_realFtLibrary) return;
         FreeType::AddDefaultModulesFn(library);
     }
 
-    // [1.12] Wszystkie haki FreeType sa __fastcall: klient wola je rejestrowo
-    // (ecx, edx, reszta na stosie). Kolejnosc argumentow bez zmian wobec 3.3.5.
-    // Dla tej funkcji potwierdza to wprost wrapper 005C17F0:
+    // [1.12] All FreeType hooks are __fastcall: the client calls them through
+    // registers (ecx, edx, the rest on the stack). Argument order is unchanged from
+    // 3.3.5. For this function the wrapper at 005C17F0 confirms it outright:
     // `mov edx, 0xC2B9A8` (alibrary) i `mov ecx, 0x85F4C8` (memory).
     int __fastcall FreeType_InitHk(void* memory, FT_Library* alibrary) {
         if (!MSDF::INITIALIZED) {
@@ -792,9 +795,10 @@ namespace {
 
             DetourTransactionBegin();
             DetourUpdateThread(GetCurrentThread());
-            // AddDefaultModules idzie w parze z hakiem Init - a ten jest bramkowany
-            // wyzej, w MSDF::initialize(), wiec tutaj jestesmy juz tylko przy
-            // ft_hooks=1. Bez tego haka klient wywala sie przy starcie (007CECA4).
+            // AddDefaultModules goes hand in hand with the Init hook - and that one
+            // is gated higher up, in MSDF::initialize(), so by this point we are
+            // only ever here with ft_hooks=1. Without this hook the client crashes
+            // at start-up (007CECA4).
             Hooks::Detour(&FreeType::AddDefaultModulesFn, FreeType_AddDefaultModulesHk);
             if (CfgOn("ft_hooks")) Hooks::Detour(&FreeType::NewMemoryFaceFn, FreeType_NewMemoryFaceHk);
             if (CfgOn("ft_hooks")) Hooks::Detour(&FreeType::Done_FaceFn, FreeType_Done_FaceHk);
@@ -832,13 +836,13 @@ namespace {
                 MSDFFont::ClearAllCache();
             });
 
-            // [1.12] Bylo tu ~50 linii wpisujacych skompilowane shadery do obiektow
-            // ShaderData klienta (00C7D2CC / 00C7D2D0) i rejestrujacych callbacki
-            // na jego haki IShaderCreateVertex/Pixel. Klient 1.12 nie ma ani tych
-            // globali, ani tych funkcji - shadery kompilujemy raz tutaj i wiazemy
-            // sami na urzadzeniu w BindMsdfShaders.
-            // [1.12] Kompilacja shaderow przeniesiona do EnsureShaders -
-            // tutaj urzadzenie D3D jeszcze nie istnieje.
+            // [1.12] This used to be ~50 lines writing the compiled shaders into
+            // the client's ShaderData objects (00C7D2CC / 00C7D2D0) and registering
+            // callbacks on its IShaderCreateVertex/Pixel hooks. The 1.12 client has
+            // neither those globals nor those functions - we compile the shaders
+            // once here and bind them on the device ourselves in BindMsdfShaders.
+            // [1.12] Shader compilation moved to EnsureShaders - at this point the
+            // D3D device does not exist yet.
 
             s_prefetchPayload.reserve(16383);
             CGxDevice::InitFontIndexBufferFn();
@@ -865,30 +869,30 @@ void MSDF::initialize() {
         return;
     }
 
-    // [1.12] Konfiguracje trzeba wczytac TUTAJ, nie w FreeType_InitHk: sam hak
-    // Init jest bramkowany, wiec decyzja zapada zanim on sie odpali.
+    // [1.12] The configuration has to be loaded HERE, not in FreeType_InitHk: the
+    // Init hook is itself gated, so the decision is made before it ever fires.
     //
-    // Hak Init i hak AddDefaultModules chodza PARAMI i musza byc wlaczane
-    // razem z reszta ft_hooks. Pierwsza wersja bisekcji zostawiala je poza
-    // bramkami i przy ft_hooks=0 klient dostawal biblioteke FreeType 2.14.1
-    // Lexary, ale wolal na niej WLASNE, stare funkcje FreeType - stan gorszy
-    // niz obie skrajnosci i crash 0xC0000005 pod 77536085. Kontrola "wszystko
-    // wylaczone" nie byla wtedy zadna kontrola.
+    // The Init hook and the AddDefaultModules hook come as a PAIR and must be
+    // enabled together with the rest of ft_hooks. The first version of the
+    // bisection left them outside the gates, and with ft_hooks=0 the client got
+    // Lexara's FreeType 2.14.1 library but called its OWN, old FreeType functions
+    // on it - a state worse than either extreme, and a 0xC0000005 crash at
+    // 77536085. The "everything disabled" control was then no control at all.
     LoadCfg();
 
-    // [1.12] msdf_enabled z pliku - ustawiane skrotem CTRL+ALT+F, czytane raz
-    // przy starcie. Renderer wylaczony = wszystkie haki czcionek pomijane,
-    // wiec klient rysuje tekst dokladnie tak jak bez tego DLL-a.
+    // [1.12] msdf_enabled comes from the file - set with the CTRL+ALT+F shortcut,
+    // read once at start-up. Renderer disabled = every font hook skipped, so the
+    // client draws text exactly as it would without this DLL.
     MSDF::ENABLED = CfgOn("msdf_enabled");
     if (!MSDF::ENABLED) {
-        Log("[MSDF] msdf_enabled=0 - renderer MSDF wylaczony na te sesje");
+        Log("[MSDF] msdf_enabled=0 - the MSDF renderer is disabled for this session");
         s_msdfInitHookArmed = true;
         return;
     }
 
     if (!CfgOn("ft_hooks")) {
-        Log("[MSDF] ft_hooks=0: FreeType klienta zostaje nietkniety,"
-            " caly renderer MSDF jest wylaczony");
+        Log("[MSDF] ft_hooks=0: the client FreeType is left untouched,"
+            " the whole MSDF renderer is disabled");
         s_msdfInitHookArmed = true;
         return;
     }
@@ -901,8 +905,8 @@ bool MSDF::CfgFlag(const char* key) {
     return CfgOn(key);
 }
 
-// [1.12] Odwrotnosc CfgOn: brak pliku ALBO brak klucza znaczy WYLACZONE.
-// Dla latek, ktorych domyslnie wlaczac nie wolno.
+// [1.12] The inverse of CfgOn: a missing file OR a missing key means DISABLED.
+// For patches that must not be enabled by default.
 bool MSDF::CfgFlagOptIn(const char* key) {
     if (g_cfgText.empty()) return false;
     const std::string needle = std::string(key) + "=";

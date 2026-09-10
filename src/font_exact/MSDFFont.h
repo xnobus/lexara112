@@ -13,9 +13,9 @@ private:
         int nextX = 0, nextY = 0;
         int rowHeight = 0;
         int g = 0;
-        // [1.12] Strona jest WSPOLNA dla wszystkich krojow, wiec sam kod znaku
-        // nie identyfikuje juz glifu - trzeba wiedziec, czyj on jest, zeby
-        // przy eksmisji uniewaznic wpis we wlasciwym m_glyphPool.
+        // [1.12] A page is SHARED by every typeface, so a character code alone no
+        // longer identifies a glyph - we have to know whose it is in order to
+        // invalidate the entry in the right m_glyphPool on eviction.
         std::vector<std::pair<MSDFFont*, uint32_t>> entries;
 
         AtlasPage(int gutter) : nextX(gutter), nextY(gutter), g(gutter) {}
@@ -38,9 +38,9 @@ public:
 
     bool IsValid() const { return m_isValid; }
 
-    // [1.12] Statyczne, bo atlas jest jeden na proces. Wolane przez `->`
-    // z MSDF.cpp i to nadal sie kompiluje - jezyk pozwala siegnac do skladowej
-    // statycznej przez obiekt.
+    // [1.12] Static, because there is one atlas per process. Called through `->`
+    // from MSDF.cpp and that still compiles - the language allows reaching a static
+    // member through an object.
     static AtlasPage* GetAtlasPage(size_t index);
     static size_t GetAtlasPageCount() { return s_atlasPages.size(); }
     static size_t GetAtlasEvictionCount() { return s_evictionCount; }
@@ -67,11 +67,12 @@ private:
     msdfgen::FontHandle* m_msdfFont;
     bool m_isValid;
 
-    // [1.12] Ile wpisow ten kroj ma we wspolnym atlasie. Zero znaczy, ze przy
-    // niszczeniu nie ma po co dotykac stron - i to wlasnie ratuje pregen,
-    // ktory tworzy MSDFFont na watkach roboczych i NIGDY nic nie uklada
-    // w atlasie (idzie prosto do GenerateMSDF). Bez tego straznika ich
-    // destruktory chodzilyby po stanie dzielonym z watkiem rysujacym.
+    // [1.12] How many entries this typeface has in the shared atlas. Zero means
+    // there is no reason to touch the pages on destruction - and that is exactly
+    // what saves the pregen, which creates MSDFFont objects on worker threads and
+    // NEVER places anything in the atlas (it goes straight to GenerateMSDF).
+    // Without this guard their destructors would walk over state shared with the
+    // rendering thread.
     size_t m_atlasEntryCount = 0;
 
     std::unique_ptr<MSDFCache> m_cache;
@@ -80,19 +81,19 @@ private:
 
     inline static ankerl::unordered_dense::map<FT_Face, std::unique_ptr<MSDFFont>> s_fontHandles;
 
-    // [1.12] JEDEN atlas na proces zamiast jednego na kroj. Wczesniej kazdy
-    // MSDFFont dostawal wlasne strony 2048x2048 A8R8G8B8 w D3DPOOL_MANAGED,
-    // czyli 16 MiB na strone i do 64 MiB na kroj - przy dziesieciu krojach
-    // narysowanych w jednej sesji klient 32-bitowy wyczerpywal przestrzen
-    // adresowa i CreateTexture odbijalo D3DERR_OUTOFVIDEOMEMORY mimo 4 GB
-    // wolnego VRAM-u (sesja 2026-09-09 21:56, crash w DrawIndexedPrimitive).
-    // Teraz gorna granica to MAX_ATLAS_PAGES * ATLAS_SIZE^2 * 4 B = 64 MiB
-    // na caly proces, niezaleznie od liczby krojow.
+    // [1.12] ONE atlas per process instead of one per typeface. Previously every
+    // MSDFFont got its own 2048x2048 A8R8G8B8 pages in D3DPOOL_MANAGED, i.e. 16 MiB
+    // per page and up to 64 MiB per typeface - with ten typefaces drawn in a single
+    // session the 32-bit client ran out of address space and CreateTexture bounced
+    // with D3DERR_OUTOFVIDEOMEMORY despite 4 GB of free VRAM (session 2026-09-09
+    // 21:56, crash in DrawIndexedPrimitive). The upper bound is now
+    // MAX_ATLAS_PAGES * ATLAS_SIZE^2 * 4 B = 64 MiB for the whole process,
+    // regardless of how many typefaces there are.
     //
-    // Indeks strony dalej mieszczy sie na dwoch bitach, bo jedzie znakami UV
-    // (MSDF.cpp: uSign/vSign) i shader wybiera nim sampler s12-s15. Wspolny
-    // atlas nie zmienia tego kodowania - zmienia tylko to, czyje glify leza
-    // na tych czterech stronach.
+    // The page index still fits in two bits, because it travels in the signs of the
+    // UVs (MSDF.cpp: uSign/vSign) and the shader uses it to pick sampler s12-s15.
+    // A shared atlas does not change that encoding - it only changes whose glyphs
+    // sit on those four pages.
     inline static std::vector<std::unique_ptr<AtlasPage>> s_atlasPages;
     inline static uint16_t s_oldestPage = 0;
     inline static uint32_t s_evictionCount = 0;

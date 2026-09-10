@@ -1,12 +1,12 @@
-// Lexara na Turtle WoW 1.12 - punkt wejscia DLL.
+// Lexara on Turtle WoW 1.12 - DLL entry point.
 //
-// Roznica wobec oryginalu: 3.3.5 ladowal Lexare jako proxy dinput8.dll.
-// Ten klient wstrzykuje DLL-e z listy `dlls.txt` przez VanillaFixes.exe,
-// wiec proxy jest zbedne - wystarczy zwykly DLL dopisany do tej listy.
-// Warstwy proxy z oryginalu (dllmain.cpp, Proxy.cpp, dinput8_exports.def)
-// nie ma w tym repozytorium.
+// The difference from the original: 3.3.5 loaded Lexara as a dinput8.dll proxy.
+// This client injects the DLLs listed in `dlls.txt` through VanillaFixes.exe, so
+// the proxy is unnecessary - a plain DLL added to that list is enough. The
+// original's proxy layer (dllmain.cpp, Proxy.cpp, dinput8_exports.def) is not
+// present in this repository.
 //
-// Nie ladujemy tez LuxShoulderCam.dll (mod do 3.3.5, nie istnieje tutaj).
+// LuxShoulderCam.dll is not loaded either (a 3.3.5 mod; it does not exist here).
 
 #include "ShutdownCheck.h"
 extern "C" volatile bool g_isProcessTerminating = false;
@@ -15,9 +15,10 @@ extern "C" volatile bool g_isProcessTerminating = false;
 #include "MSDF.h"
 #include "font_exact/D3D.h"
 
-// [1.12] Log WLACZONY na czas pierwszych testow. Pisze do lexara112.log
-// obok klienta. Wylaczyc, gdy port bedzie dzialal - kazdy wpis to otwarcie
-// pliku, wiec nie wolno tego wolac z petli rysowania bez straznika.
+// [1.12] Logging is ENABLED for the first round of testing. It writes to
+// lexara112.log next to the client. Turn it off once the port is working - every
+// entry opens the file, so this must never be called from the draw loop without a
+// guard.
 #include <cstdio>
 #include <cstdarg>
 

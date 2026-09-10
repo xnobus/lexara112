@@ -1,4 +1,4 @@
-# --- wynik budowania ---
+# --- build output ---
 build/
 out/
 *.dll
@@ -18,7 +18,7 @@ CMakeFiles/
 *.vcxproj.user
 *.sln
 
-# --- lokalne ---
+# --- local ---
 *.log
 lexara112.cfg
 __pycache__/

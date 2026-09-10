@@ -1131,12 +1131,13 @@ public:
     using GetOrCreateGlyphEntry_t = CGxGlyphCacheEntry * (__thiscall*)(CGxFont*, uint32_t codepoint);
     using GetBearingX_t = double(__thiscall*)(CGxFont*, CGxGlyphCacheEntry*, float flag, float scale);
 
-    // [1.12] Obie domkniete w etapie 3 przez lancuch wolajacy-wolany:
-    // 3.3.5 006C09A0 (jedyny obok InitializeTextLine wolajacy GetBearingX)
-    // odpowiada 1.12 005C6B70, a w nim wprost przed GetBearingX stoi GetOrCreate.
-    // Potwierdzenie drugie: obie sa wolane rowniez z InitializeTextLine (005CCBE0).
-    // GetBearingX 005CB080 zgadza sie z 006C24F0 instrukcja w instrukcje
-    // (`fld [eax+0x50]`, ret 0xC, galaz else woła GetFontEffectiveHeight).
+    // [1.12] Both pinned down in stage 3 through the caller-callee chain:
+    // 3.3.5 006C09A0 (the only caller of GetBearingX besides InitializeTextLine)
+    // corresponds to 1.12 005C6B70, and there GetOrCreate sits directly before
+    // GetBearingX. A second confirmation: both are also called from
+    // InitializeTextLine (005CCBE0). GetBearingX 005CB080 matches 006C24F0
+    // instruction for instruction (`fld [eax+0x50]`, ret 0xC, the else branch
+    // calls GetFontEffectiveHeight).
     inline static GetOrCreateGlyphEntry_t GetOrCreateGlyphEntryFn = reinterpret_cast<GetOrCreateGlyphEntry_t>(0x005CABD0);  // 3.3.5: 006C3FC0
     inline static GetBearingX_t GetBearingXFn = reinterpret_cast<GetBearingX_t>(0x005CB080);                                // 3.3.5: 006C24F0
 
@@ -1170,18 +1171,19 @@ public:
     int32_t m_gradientStartChar;                // 0x68
     int32_t m_gradientLength;                   // 0x6C
     C3Vector m_finalPos;                        // 0x70
-    // [1.12] Wszystko do 0x7C wlacznie jest identyczne z 3.3.5. Dalej 1.12 ma
-    // o 0x14 bajtow MNIEJ: w 3.3.5 zakres 0x7C..0xB3 to trzy tablice
-    // (m_hyperlinks, m_embeddedTextures, m_gradientInfo) plus licznik klikniec,
-    // w 1.12 na tym miejscu jest 0x24 bajtow, ktorych zaden hak nie dotyka.
-    // Licznik z CheckGeometry siedzi tu pod 0x9C (3.3.5: 0x9C+0x14 = 0xB0).
-    // Wyprowadzone porownaniem instrukcja w instrukcje, patrz _lexara-port-mapa.md.
+    // [1.12] Everything up to and including 0x7C is identical to 3.3.5. Beyond
+    // that 1.12 has 0x14 bytes FEWER: in 3.3.5 the range 0x7C..0xB3 holds three
+    // arrays (m_hyperlinks, m_embeddedTextures, m_gradientInfo) plus a click
+    // counter, while in 1.12 the same place holds 0x24 bytes that no hook touches.
+    // The CheckGeometry counter sits here at 0x9C (3.3.5: 0x9C+0x14 = 0xB0).
+    // Derived by an instruction-by-instruction comparison, see lexara-port-map.md.
     unk_t unk_7C[9];                            // 0x7C  (3.3.5: 0x7C..0xB3)
     CGxFontGeomBatch* m_geomBuffers[8];         // 0xA0  (3.3.5: 0xB4)
     uint32_t m_timeSinceUpdate;                 // 0xC0  (3.3.5: 0xD4)
 
     // [1.12] GetFontFace: 3.3.5 0x006C8080 -> 1.12 0x005D0370, ecx = owijka FT.
-    // [1.12] konwencja rejestrowa: argument w ECX, nie na stosie -> __fastcall.
+    // [1.12] register convention: the argument goes in ECX, not on the stack ->
+    // __fastcall.
     FT_Face GetFontFace() const { return reinterpret_cast<FT_Face(__fastcall*)(void*)>(0x005D0370)(this->m_fontObj->m_ftWrapper); }
     static FT_Face GetFontFace(void* ptr) { return reinterpret_cast<FT_Face(__fastcall*)(void*)>(0x005D0370)(ptr); }
 
@@ -1191,7 +1193,8 @@ public:
     using CheckGeometry_t = bool(__thiscall*)(CGxString*);
     using GetVertCountForPage_t = uint32_t(__thiscall*)(CGxString*, int pageIdx);
 
-    // [1.12] Adresy z etapu 2. Konwencja bez zmian (ecx = this), tylko inne adresy.
+    // [1.12] Addresses from stage 2. The convention is unchanged (ecx = this),
+    // only the addresses differ.
     inline static WriteGeometry_t WriteGeometryFn = reinterpret_cast<WriteGeometry_t>(0x005CE0C0);          // 3.3.5: 006C5E90
     inline static InitializeTextLine_t InitializeTextLineFn = reinterpret_cast<InitializeTextLine_t>(0x005CCBE0); // 3.3.5: 006C6CD0
     inline static ClearInstanceData_t ClearInstanceDataFn = reinterpret_cast<ClearInstanceData_t>(0x005CDEF0);    // 3.3.5: 006C6B90
@@ -1261,12 +1264,13 @@ public:
     unk_t unk_14;
     GxuFontBatchNode m_head;
 
-    // [1.12] KONWENCJE SIE ROZNIA, nie tylko adresy.
-    // GetFontEffectiveWidth/Height: 3.3.5 __cdecl(int, float) -> 1.12 ecx = is3d,
-    // float na stosie, czyli __fastcall (float i tak nigdy nie idzie rejestrem).
-    // RenderGlyph: 3.3.5 __cdecl(7 arg) -> 1.12 ecx = face, edx = fontSize,
-    // reszta na stosie (005D1129 `mov edi,ecx` / `mov esi,edx`).
-    // RenderBatch bez zmian: ecx = this.
+    // [1.12] THE CONVENTIONS DIFFER, not just the addresses.
+    // GetFontEffectiveWidth/Height: 3.3.5 __cdecl(int, float) -> 1.12 ecx = is3d
+    // with the float on the stack, i.e. __fastcall (a float never travels in a
+    // register anyway).
+    // RenderGlyph: 3.3.5 __cdecl(7 args) -> 1.12 ecx = face, edx = fontSize, the
+    // rest on the stack (005D1129 `mov edi,ecx` / `mov esi,edx`).
+    // RenderBatch unchanged: ecx = this.
     using RenderBatch_t = void(__thiscall*)(CGxuFont*);
     using GetFontEffectiveWidth_t = double(__fastcall*)(int, float);
     using GetFontEffectiveHeight_t = double(__fastcall*)(int, float);
@@ -1384,16 +1388,16 @@ static_assert(sizeof(CGNamePlate) == 0x300);
 
 class FreeType {
 public:
-    // [1.12] WSZYSTKIE osiem to __fastcall, nie __cdecl. Sprawdzone prologiem
-    // i zgodnoscia `ret N` z liczba argumentow (2 pierwsze w ecx/edx, reszta
-    // na stosie, sprzata wolany):
-    //   New_Memory_Face ret 0xC (5 arg)   Done_Face      ret 0   (1 arg)
-    //   Set_Pixel_Sizes ret 4   (3 arg)   Get_Char_Index ret 0   (2 arg)
-    //   Load_Glyph      ret 4   (3 arg)   Get_Kerning    ret 0xC (5 arg)
-    //   Done_FreeType   ret 0   (1 arg)   New_Library    ret 0   (2 arg)
-    // Kolejnosc argumentow taka sama jak w 3.3.5 - zmienia sie tylko sposob
-    // przekazania. Potwierdzenie dla New_Library niezalezne: wrapper 005C17F0
-    // robi `mov edx,0xC2B9A8; mov ecx,0x85F4C8; call 007CF0E0`.
+    // [1.12] ALL eight are __fastcall, not __cdecl. Verified from the prologue and
+    // from `ret N` matching the argument count (first two in ecx/edx, the rest on
+    // the stack, cleaned up by the callee):
+    //   New_Memory_Face ret 0xC (5 args)  Done_Face      ret 0   (1 arg)
+    //   Set_Pixel_Sizes ret 4   (3 args)  Get_Char_Index ret 0   (2 args)
+    //   Load_Glyph      ret 4   (3 args)  Get_Kerning    ret 0xC (5 args)
+    //   Done_FreeType   ret 0   (1 arg)   New_Library    ret 0   (2 args)
+    // Argument order is the same as in 3.3.5 - only the way they are passed
+    // changes. An independent confirmation for New_Library: the wrapper at
+    // 005C17F0 does `mov edx,0xC2B9A8; mov ecx,0x85F4C8; call 007CF0E0`.
     using Init_t = int(__fastcall*)(void* memory, FT_Library*);
     using NewMemoryFace_t = int(__fastcall*)(FT_Library, const FT_Byte* file_base, FT_Long file_size, FT_Long face_index, FT_Face*);
     using Done_Face_t = int(__fastcall*)(FT_Face);
@@ -1402,9 +1406,9 @@ public:
     using LoadGlyph_t = int(__fastcall*)(FT_Face, FT_ULong glyph_index, FT_Int32 load_flags);
     using GetKerning_t = int(__fastcall*)(FT_Face, FT_UInt left_glyph, FT_UInt right_glyph, FT_UInt kern_mode, FT_Vector* akerning);
     using Done_FreeType_t = int(__fastcall*)(FT_Library);
-    // [1.12] FT_Add_Default_Modules. W 3.3.5 Lexara go nie hakowala i uchodzilo
-    // jej to na sucho; tutaj to byl crash przy starcie - patrz komentarz przy
-    // FreeType_AddDefaultModulesHk w MSDF.cpp.
+    // [1.12] FT_Add_Default_Modules. On 3.3.5 Lexara did not hook it and got away
+    // with it; here that meant a crash at start-up - see the comment at
+    // FreeType_AddDefaultModulesHk in MSDF.cpp.
     using AddDefaultModules_t = void(__fastcall*)(FT_Library);
 
     inline static auto InitFn = reinterpret_cast<Init_t>(0x007CF0E0);                     // 3.3.5: 00991320
@@ -1416,16 +1420,16 @@ public:
     inline static auto GetKerningFn = reinterpret_cast<GetKerning_t>(0x007CE830);         // 3.3.5: 00991050
     inline static auto Done_FreeTypeFn = reinterpret_cast<Done_FreeType_t>(0x007CF160);   // 3.3.5: 00992CB0
     inline static auto AddDefaultModulesFn = reinterpret_cast<AddDefaultModules_t>(0x007CCFC0); // 3.3.5: 00990650
-    // [1.12] FT_New_Face (3.3.5 009931A0) POMINIETE: nie znalazlem jej w 1.12,
-    // bo zaden z dwoch klientow jej nie wola. Hak Lexary byl zapobiegawczy.
+    // [1.12] FT_New_Face (3.3.5 009931A0) OMITTED: it was not found in 1.12,
+    // because neither of the two clients calls it. Lexara's hook was precautionary.
 };
 
 class CGxDevice {
 public:
-    // [1.12] To NIE sa metody CGxDevice - w 1.12 nie ma globalu urzadzenia
-    // (3.3.5 00C5DF88). To wolne funkcje w konwencji rejestrowej.
-    // bufalloc: ecx = &stream, edx = rozmiar.
-    // PoolCreate: ecx = 1, edx = 0, trzy argumenty na stosie.
+    // [1.12] These are NOT CGxDevice methods - 1.12 has no device global
+    // (3.3.5 00C5DF88). They are free functions using a register convention.
+    // bufalloc: ecx = &stream, edx = size.
+    // PoolCreate: ecx = 1, edx = 0, three arguments on the stack.
     using FlushBuffer_t = int(__fastcall*)(int* bufferHandle, int bufferSize);
     using InitFontIndexBuffer_t = int(__cdecl*)();
     using PoolCreate_t = void* (__fastcall*)(int one, int zero, int size, int usage, const char* name);
@@ -1518,18 +1522,18 @@ public:
     inline static auto DeviceSetFormatFn = reinterpret_cast<DeviceSetFormat_t>(0x006904D0);
     inline static auto IDestroyD3dFn = reinterpret_cast<IDestroyD3d_t>(0x006903B0);
     inline static auto IReleaseD3dResourcesFn = reinterpret_cast<IReleaseD3dResources_t>(0x00690150);
-    // [1.12] UWAGA: ponizsze piec adresow to WCIAZ 3.3.5 i NIE WOLNO ich wywolac
-    // na tym kliencie. IShaderCreateVertex / IShaderCreatePixel nie maja w 1.12
-    // odpowiednika w ogole - klient nie tworzy zadnych shaderow czcionek
-    // (wrapper 005C17F0 idzie wprost do InitFontIndexBuffer). Port wiaze wlasne
-    // shadery na IDirect3DDevice9 w haku DrawIndexedPrimitive; patrz "Etap 3"
-    // w _lexara-port-mapa.md. Zostawione tylko po to, zeby D3D.cpp sie kompilowal,
-    // dopoki ta warstwa nie zostanie przepisana.
-    // [1.12] Piec powyzszych adresow to 3.3.5 i NIE SA juz nigdzie wolane -
-    // warstwa urzadzenia w D3D.cpp bierze IDirect3DDevice9 z lancucha
-    // LoadLibrary -> Direct3DCreate9 -> CreateDevice, bez ani jednego adresu
-    // klienta. IShaderCreateVertex/Pixel nie maja w 1.12 odpowiednika w ogole.
-    // Zostawione wylacznie jako slad po oryginale; nie uzywac.
+    // [1.12] NOTE: the five addresses below are STILL 3.3.5 ones and MUST NOT be
+    // called on this client. IShaderCreateVertex / IShaderCreatePixel have no 1.12
+    // counterpart at all - the client creates no font shaders (the wrapper at
+    // 005C17F0 goes straight to InitFontIndexBuffer). The port binds its own
+    // shaders on IDirect3DDevice9 inside the DrawIndexedPrimitive hook; see
+    // "Stage 3" in lexara-port-map.md. Kept only so that D3D.cpp keeps compiling
+    // until that layer is rewritten.
+    // [1.12] The five addresses above are 3.3.5 ones and are NO LONGER called
+    // anywhere - the device layer in D3D.cpp takes its IDirect3DDevice9 from the
+    // LoadLibrary -> Direct3DCreate9 -> CreateDevice chain, without a single client
+    // address. IShaderCreateVertex/Pixel have no 1.12 counterpart at all.
+    // Kept purely as a trace of the original; do not use.
 };
 
 class DBItemCache {

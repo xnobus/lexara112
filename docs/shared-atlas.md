@@ -1,166 +1,170 @@
-# Wspolny atlas MSDF - jeden na proces zamiast jednego na kroj
+# The shared MSDF atlas - one per process instead of one per typeface
 
-## Objaw
+## Symptom
 
-`Errors\2026-09-09 21.56.59 Crash.txt`: `ACCESS_VIOLATION` w `ucrtbase!memcpy+78`,
-wolanym z `d3d9.dll` (DXVK 2.6.1 **x86**). Ramka nizej to `0x005A10A0`, czyli
-powrot z `call [ebx+0x148]` pod `0x005A109A` - `IDirect3DDevice9::DrawIndexedPrimitive`
-(indeks 82 w vtable, siedem pushy zgadza sie z sygnaturą). Rejestry:
-`ECX=EDX=0x10000` (64 KiB), zrodlo `ESI=EBX=0x000CCDC0` - adres niezmapowany.
+`Errors\2026-09-09 21.56.59 Crash.txt`: an `ACCESS_VIOLATION` in
+`ucrtbase!memcpy+78`, called from `d3d9.dll` (DXVK 2.6.1 **x86**). The frame below
+it is `0x005A10A0`, i.e. the return from `call [ebx+0x148]` at `0x005A109A` -
+`IDirect3DDevice9::DrawIndexedPrimitive` (index 82 in the vtable; the seven pushes
+match the signature). Registers: `ECX=EDX=0x10000` (64 KiB), source
+`ESI=EBX=0x000CCDC0` - an unmapped address.
 
-Dwie ostatnie linie `lexara112.log` przed smiercia procesu:
+The last two lines of `lexara112.log` before the process died:
 
 ```
-[MSDF] CreateTexture 2048x2048 fmt=21 pool=1 hr=0x8876017C wolne=4048 MB
-[MSDF] CreateAtlasPage: CreateTexture 2048x2048 ODMOWIL (stron dotad=0, max=4)
+[MSDF] CreateTexture 2048x2048 fmt=21 pool=1 hr=0x8876017C free=4048 MB
+[MSDF] CreateAtlasPage: CreateTexture 2048x2048 REFUSED (pages so far=0, max=4)
 ```
 
-`0x8876017C` to `D3DERR_OUTOFVIDEOMEMORY`, ale `GetAvailableTextureMem()` melduje
-4048 MB wolnego. **To nie VRAM - to 32-bitowa przestrzen adresowa procesu.**
-`D3DPOOL_MANAGED` trzyma w DXVK pelna kopie tekstury w pamieci procesu.
+`0x8876017C` is `D3DERR_OUTOFVIDEOMEMORY`, yet `GetAvailableTextureMem()` reports
+4048 MB free. **This is not VRAM - it is the process's 32-bit address space.**
+`D3DPOOL_MANAGED` makes DXVK keep a full copy of the texture in process memory.
 
-## Przyczyna
+## Cause
 
-`MSDFFont::CreateAtlasPage` alokowal strony **na kroj**: kazdy `MSDFFont`
-dostawal wlasne 2048x2048 A8R8G8B8 w `D3DPOOL_MANAGED`, czyli 16 MiB na strone
-i do `MAX_ATLAS_PAGES` = 4 stron, a wiec do **64 MiB na jeden kroj**. Gorna
-granica calosci nie istniala - rosla z liczba faktycznie rysowanych krojow.
+`MSDFFont::CreateAtlasPage` allocated pages **per typeface**: every `MSDFFont` got
+its own 2048x2048 A8R8G8B8 pages in `D3DPOOL_MANAGED`, i.e. 16 MiB per page and up
+to `MAX_ATLAS_PAGES` = 4 pages, so up to **64 MiB for a single typeface**. There
+was no upper bound on the total - it grew with the number of typefaces actually
+drawn.
 
-W feralnej sesji powstalo 10 atlasow (160 MiB), jedenasty zostal odrzucony
-dwukrotnie, a chwile pozniej DXVK zginal na kopiowaniu bufora przy rysowaniu.
-Sam ciag "brak przestrzeni adresowej -> crash w memcpy" jest wnioskiem
-z kolejnosci zdarzen, nie z dowodu w zrzucie - ale `ODMOWIL` wystepuje
-w calym logu **tylko 2 razy i tylko w tej sesji**.
+In the fatal session 10 atlases were created (160 MiB), an eleventh was refused
+twice, and moments later DXVK died copying a buffer during a draw. The chain "out
+of address space -> crash in memcpy" is an inference from the order of events, not
+something proven in the dump - but `REFUSED` appears in the entire log **only twice,
+and only in that session**.
 
-## Zmiana
+## The change
 
-`s_atlasPages`, `s_oldestPage` i `s_evictionCount` sa teraz **statyczne**:
-jeden atlas na proces, dzielony przez wszystkie kroje. Gorna granica to
-`MAX_ATLAS_PAGES * ATLAS_SIZE^2 * 4 B` = **64 MiB na caly proces**, niezaleznie
-od liczby krojow.
+`s_atlasPages`, `s_oldestPage` and `s_evictionCount` are now **static**: one atlas
+per process, shared by every typeface. The upper bound is
+`MAX_ATLAS_PAGES * ATLAS_SIZE^2 * 4 B` = **64 MiB for the whole process**,
+regardless of how many typefaces there are.
 
-**Kodowanie strony sie nie zmienia.** Indeks strony jedzie znakami UV
-(`MSDF.cpp`: `uSign`/`vSign`), a shader wybiera nim sampler `s12`-`s15`
-(`MSDFShaders.h`). To dwa bity, wiec 4 strony to sufit narzucony przez format
-wierzcholka klienta (`CGxFontVertex` ma tylko `pos`, `u`, `v` - `pos.z` niesie
-glebokosc tekstu 3D, wiec nie da sie go zabrac). Wspolny atlas nie rusza tego
-kodowania - zmienia tylko to, czyje glify leza na tych czterech stronach.
+**The page encoding does not change.** The page index travels in the signs of the
+UVs (`MSDF.cpp`: `uSign`/`vSign`), and the shader uses it to pick sampler `s12`-`s15`
+(`MSDFShaders.h`). That is two bits, so 4 pages is a ceiling imposed by the client's
+vertex format (`CGxFontVertex` has only `pos`, `u`, `v` - and `pos.z` carries the
+depth of 3D text, so it cannot be taken). The shared atlas does not touch that
+encoding - it only changes whose glyphs sit on those four pages.
 
-### Eksmisja
+### Eviction
 
-Strona miesza teraz kroje, wiec `AtlasPage::codepoints` (`vector<uint32_t>`)
-stalo sie `entries` (`vector<pair<MSDFFont*, uint32_t>>`) - sam kod znaku nie
-identyfikuje juz glifu.
+A page now mixes typefaces, so `AtlasPage::codepoints` (`vector<uint32_t>`) became
+`entries` (`vector<pair<MSDFFont*, uint32_t>>`) - a character code alone no longer
+identifies a glyph.
 
-`EvictOldestPage()` **uniewaznia wpisy zamiast je usuwac**, i to jest
-poprawka, nie kosmetyka: `m_glyphPool` to `ankerl::unordered_dense` - mapa
-gesta, ktorej `erase` przestawia inne elementy. `UploadGlyphToAtlas` dostaje
-`GlyphMetrics&` **z tej wlasnie mapy** i trzyma te referencje przez cala
-eksmisje, wiec kazdy `erase` w trakcie moze ja uniewaznic. Stary kod robil
-dokladnie to (na wpisach wlasnego kroju) i uchodzilo mu to plazem tylko
-dlatego, ze eksmisje byly rzadkie. Zerowanie `u0/v0/u1/v1` nie rusza ukladu
-mapy, a `GetGlyph` i tak rozpoznaje wpis o zerowym `u1`/`v1` jako "nigdy nie
-wgrany" i wysyla go do atlasu ponownie - ta sciezka ponowienia juz istnieje
-i jest przechodzona przy kazdym starcie, przed pierwsza klatka.
+`EvictOldestPage()` **invalidates entries instead of erasing them**, and that is a
+fix, not cosmetics: `m_glyphPool` is an `ankerl::unordered_dense` - a dense map
+whose `erase` moves other elements around. `UploadGlyphToAtlas` receives a
+`GlyphMetrics&` **from that very map** and holds that reference across the whole
+eviction, so any `erase` during it can invalidate the reference. The old code did
+exactly that (on its own typeface's entries) and got away with it only because
+evictions were rare. Zeroing `u0/v0/u1/v1` does not disturb the map's layout, and
+`GetGlyph` already recognises an entry with a zero `u1`/`v1` as "never uploaded"
+and sends it to the atlas again - that retry path already exists and is walked at
+every start-up, before the first frame.
 
-Licznik eksmisji jest globalny, wiec `CheckGeometryHk` przebuduje geometrie
-**kazdego** napisu, nie tylko tego kroju, ktory wywolal eksmisje. Tak ma byc:
-strona miesza kroje.
+The eviction counter is global, so `CheckGeometryHk` rebuilds the geometry of
+**every** string, not just of the typeface that triggered the eviction. That is
+intended: a page mixes typefaces.
 
-### Odmowa alokacji nie jest juz koncem glifu
+### A refused allocation is no longer the end of a glyph
 
-Wczesniej `CreateAtlasPage() == false` konczylo sie `return false` - glif
-przepadal na dobre (te 392 odrzucone glify z komentarza w kodzie). Teraz
-odmowa alokacji spada na te sama sciezke co osiagniecie `MAX_ATLAS_PAGES`:
-eksmituj najstarsza strone i uloz glif tam. Skoro strony sa wspolne, jest
-sie czym podzielic.
+Previously `CreateAtlasPage() == false` ended in `return false` - the glyph was
+lost for good (those 392 rejected glyphs from the comment in the code). A refused
+allocation now falls onto the same path as reaching `MAX_ATLAS_PAGES`: evict the
+oldest page and place the glyph there. Now that the pages are shared, there is
+something to share out.
 
-### Cykl zycia
+### Lifetime
 
-- `~MSDFFont` **nie zwalnia stron** - zabralby je krojom, ktore dalej rysuja.
-  Wymiata za to wpisy tego kroju (`ForgetFontEntries`), bo trzymaja `this`
-  i eksmisja siegnelaby po martwy obiekt.
-- Straznik `m_atlasEntryCount != 0` przed tym wymiataniem jest **konieczny
-  ze wzgledu na watki**: `MSDFPregen` tworzy `MSDFFont` na watkach roboczych
-  i te obiekty nigdy nic nie ukladaja w atlasie (ida prosto do `GenerateMSDF`).
-  Bez straznika ich destruktory chodzilyby po stanie dzielonym z watkiem
-  rysujacym.
-- `ClearAllCache()` (z `D3D::RegisterOnDestroy`) zwalnia strony i zeruje
-  pule glifow wszystkich krojow - urzadzenie znika, tekstury musza pojsc.
-- `Shutdown()` czysci `s_fontHandles` i `s_atlasPages`.
+- `~MSDFFont` **does not release pages** - that would take them away from
+  typefaces that are still drawing. What it does is sweep out this typeface's
+  entries (`ForgetFontEntries`), because they hold `this` and an eviction would
+  reach into a dead object.
+- The `m_atlasEntryCount != 0` guard before that sweep is **necessary for thread
+  safety**: `MSDFPregen` creates `MSDFFont` objects on worker threads and those
+  objects never place anything in the atlas (they go straight to `GenerateMSDF`).
+  Without the guard their destructors would walk over state shared with the
+  rendering thread.
+- `ClearAllCache()` (from `D3D::RegisterOnDestroy`) releases the pages and clears
+  the glyph pools of every typeface - the device is going away, so the textures
+  must go.
+- `Shutdown()` clears `s_fontHandles` and `s_atlasPages`.
 
-## Czego to NIE naprawia
+## What this does NOT fix
 
-Pojemnosc. Wczesniej kazdy kroj mial 4 strony dla siebie; teraz dzieli 4 strony
-z pozostalymi. Przy `SDF_RENDER_SIZE = 96` i `SDF_SPREAD = 12` typowy glif
-lacinski zajmuje ok. 74x94 px, z odstepem `ATLAS_GUTTER = 14` daje to ok. 23x18
-= ~410 glifow na strone, czyli **~1650 na caly atlas**. Dziesiec krojow po
-ok. 120 uzywanych znakow to ~1200 - miesci sie, ale bez zapasu.
+Capacity. Previously each typeface had 4 pages to itself; now it shares 4 pages
+with all the others. At `SDF_RENDER_SIZE = 96` and `SDF_SPREAD = 12` a typical
+Latin glyph takes about 74x94 px, which with `ATLAS_GUTTER = 14` gives about
+23x18 = ~410 glyphs per page, i.e. **~1650 for the whole atlas**. Ten typefaces at
+roughly 120 used characters each is ~1200 - it fits, but with no headroom.
 
-Jesli w logu zacznie sie mnozyc eksmisja (`s_evictionCount` rosnie, tekst
-migocze przy przebudowie geometrii), nastepna dzwignia to **`SDF_RENDER_SIZE`
-96 -> 64**: powierzchnia glifu spada wtedy ok. 2,2x, czyli pojemnosc atlasu
-rosnie do ~3600 glifow. Kosztem jest ostrosc bardzo duzego tekstu.
+If evictions start multiplying in the log (`s_evictionCount` rising, text flickering
+as the geometry is rebuilt), the next lever is **`SDF_RENDER_SIZE` 96 -> 64**: the
+glyph area then drops by about 2.2x, so the atlas capacity rises to ~3600 glyphs.
+The cost is the sharpness of very large text.
 
-## Regresja, ktora ta zmiana wywolala - i jej naprawa (22:59)
+## The regression this change caused - and its fix (22:59)
 
-Pierwsza wersja wspolnego atlasu zabila klienta po 45 minutach:
-`Errors\2026-09-09 22.59.20 Crash.txt`, `ACCESS_VIOLATION` **w calosci wewnatrz
-lexara112.dll** (baza `0x68DD0000`, szczyt `+0x95D8E`, ramka nizej `+0x1AEEA`).
-Rejestry nazywaja miejsce jednoznacznie: `ECX=EDX=0x180`, `EAX=ESI+0x180`,
-`ESI` niezmapowane. `0x180` = 384 = `metrics.width * 4` przy `width = 96`,
-czyli **petla wierszy w `UploadGlyphToAtlas`** - `memcpy` czytal zwolniona
-pamiec.
+The first version of the shared atlas killed the client after 45 minutes:
+`Errors\2026-09-09 22.59.20 Crash.txt`, an `ACCESS_VIOLATION` **entirely inside
+lexara112.dll** (base `0x68DD0000`, top `+0x95D8E`, frame below `+0x1AEEA`). The
+registers name the location unambiguously: `ECX=EDX=0x180`, `EAX=ESI+0x180`, `ESI`
+unmapped. `0x180` = 384 = `metrics.width * 4` at `width = 96`, i.e. **the row loop
+in `UploadGlyphToAtlas`** - `memcpy` was reading freed memory.
 
-### Przyczyna
+### Cause
 
-`GlyphMetrics::pixelData` jest wazne **tylko do konca biezacego wywolania**.
-Wskazuje albo w bufor `storage`, ktory zaraz po uploadzie idzie do
-`MSDFCache::StoreGlyph` i ginie przy najblizszym `FlushPendingWrites`
-(`m_pendingWrites` czysci sie po `WRITE_BATCH_SIZE` wpisach), albo - na sciezce
-`TryLoadGlyph` - w blok pliku cache zmapowany przez `MSDFManager`
-(`outMetrics.pixelData = blockPtr->payload + ge.dataOffset`), ktory tez potrafi
-zniknac.
+`GlyphMetrics::pixelData` is valid **only until the end of the current call**. It
+points either into the `storage` buffer, which right after the upload goes to
+`MSDFCache::StoreGlyph` and dies at the next `FlushPendingWrites` (`m_pendingWrites`
+is cleared after `WRITE_BATCH_SIZE` entries), or - on the `TryLoadGlyph` path -
+into a block of the cache file mapped by `MSDFManager`
+(`outMetrics.pixelData = blockPtr->payload + ge.dataOffset`), which can also
+disappear.
 
-Sciezka ponowienia uploadu (`neverUploaded`, czyli `u1 == 0 && v1 == 0`)
-istniala wczesniej, ale odpalala sie **tylko przy starcie**, dla glifow
-dotknietych zanim pojawilo sie urzadzenie D3D - a wtedy `pixelData` bylo
-swieze, bo od jego ustawienia minelo kilka instrukcji. Wspolny atlas skierowal
-w to samo miejsce **eksmisje**: uniewazniony glif wracal tedy po minutach,
-z dawno martwym wskaznikiem.
+The upload retry path (`neverUploaded`, i.e. `u1 == 0 && v1 == 0`) existed before,
+but fired **only at start-up**, for glyphs touched before a D3D device appeared -
+and then `pixelData` was fresh, a few instructions old. The shared atlas routed
+**evictions** into the same place: an invalidated glyph came back through it
+minutes later, with a long-dead pointer.
 
-To nie jest usterka odziedziczona - to skutek uboczny tej zmiany. Stara,
-per-kroj eksmisja **usuwala** wpis z `m_glyphPool`, wiec glif zawsze wracal
-pelna sciezka (cache -> generacja) i nigdy nie czytal starego wskaznika.
+This is not an inherited bug - it is a side effect of this change. The old
+per-typeface eviction **erased** the entry from `m_glyphPool`, so the glyph always
+came back through the full path (cache -> generation) and never read the stale
+pointer.
 
-### Naprawa
+### Fix
 
-Dwa pociagniecia, obie w `MSDFFont.cpp`:
+Two strokes, both in `MSDFFont.cpp`:
 
-1. Udany `UploadGlyphToAtlas` **zeruje `metrics.pixelData`**. Piksele sa juz
-   w atlasie, a wskaznik i tak nie przezyje - stale odczytanie staje sie
-   niemozliwe z konstrukcji, zamiast zalezec od tego, kto pamieta o cyklu zycia.
-2. Sciezka ponowienia sprawdza `pixelData`. NULL znaczy "wez piksele od nowa":
-   kasujemy wpis z puli i wchodzimy w pelna sciezke przez `GetGlyph`. Kasowanie
-   jest tu bezpieczne mimo gestej mapy, bo zadna referencja do puli nie jest
-   jeszcze w rekach - ani naszych, ani wolajacego.
+1. A successful `UploadGlyphToAtlas` **nulls `metrics.pixelData`**. The pixels are
+   already in the atlas and the pointer will not survive anyway - a stale read
+   becomes impossible by construction, instead of depending on whoever remembers
+   the lifetime rules.
+2. The retry path checks `pixelData`. NULL means "fetch the pixels again": we drop
+   the entry from the pool and take the full path through `GetGlyph`. Erasing is
+   safe here despite the dense map, because no reference into the pool is in
+   anyone's hands yet - ours or the caller's.
 
-Rekurencja siega jednego poziomu: po `erase` wpisu nie ma, wiec wywolanie idzie
-przez `try_emplace` i konczy sie na `TryLoadGlyph` albo generacji.
+The recursion goes one level deep: after the `erase` the entry is gone, so the call
+goes through `try_emplace` and ends at `TryLoadGlyph` or at generation.
 
-## Sprawdzenie
+## Verification
 
-Zbudowane 2026-09-09 22:14, poprawka pixelData 23:02 (`build.bat` wymaga cmake; tu poszlo bezposrednio
-MSBuild-em na wygenerowanym `build\lexara112.vcxproj`, bo w systemie nie ma
-cmake w PATH). W grze **niesprawdzone** - do potwierdzenia potrzeba sesji,
-w ktorej narysuje sie kilkanascie roznych krojow.
+Built 2026-09-09 22:14, the pixelData fix at 23:02 (`build.bat` requires cmake;
+here MSBuild was run directly on the generated `build\lexara112.vcxproj`, because
+the system has no cmake in PATH). **Not verified in game** - confirming it needs a
+session in which a dozen or so different typefaces get drawn.
 
-Czego szukac w `lexara112.log`:
+What to look for in `lexara112.log`:
 
-| linia | znaczenie |
+| line | meaning |
 |---|---|
-| `strona N utworzona (..., atlas wspolny)` | maksymalnie 4 razy na sesje, nie 4 razy na kroj |
-| `ODMOWIL` | nie powinno sie juz pojawiac po zbudowaniu 4 stron |
+| `page N created (..., shared atlas)` | at most 4 times per session, not 4 times per typeface |
+| `REFUSED` | should no longer appear once 4 pages have been built |
 
-Stan sprzed przejscia na atlas wspolny jest w historii gita (`MSDFFont.h`,
-`MSDFFont.cpp` przed commitem wprowadzajacym te zmiane).
+The state before the move to a shared atlas is in the git history (`MSDFFont.h`,
+`MSDFFont.cpp` before the commit that introduced this change).

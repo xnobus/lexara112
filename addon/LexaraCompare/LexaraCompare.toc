@@ -1,6 +1,6 @@
 ## Interface: 11200
 ## Title: Lexara Compare
-## Notes: Panel porownawczy do portu Lexary (HD MSDF). /lexara
-## Author: port 1.12
+## Notes: Comparison panel for the Lexara port (HD MSDF). /lexara
+## Author: 1.12 port
 
 LexaraCompare.lua

@@ -1,55 +1,56 @@
--- LexaraCompare - stały wzorzec tekstu do oceny portu Lexary (HD MSDF).
+-- LexaraCompare - a fixed text sample for judging the Lexara port (HD MSDF).
 --
--- Sam renderer przelacza sie skrotem CTRL+ALT+F (obsluga jest w lexara112.dll,
--- w haku EndScene). Ten addon niczego nie przelacza - daje material porownawczy,
--- zeby roznice bylo widac na tym samym tekscie, a nie z pamieci.
+-- The renderer itself is toggled with CTRL+ALT+F11 (handled in lexara112.dll,
+-- inside the EndScene hook). This addon toggles nothing - it provides comparison
+-- material, so that differences can be seen on the same text rather than from
+-- memory.
 --
--- Lua 5.0 / 1.12: table.getn zamiast #, this w handlerach, sciezki przez [[...]].
+-- Lua 5.0 / 1.12: table.getn instead of #, `this` in handlers, paths via [[...]].
 
--- Kazdy wiersz to wlasna para {rozmiar, tekst}. Wczesniej rozmiary i probki
--- byly osobnymi tablicami laczonymi przez math.mod, przez co przy duzych
--- rozmiarach trafial sie dlugi tekst i wyjezdzal poza ramke.
-local LINIE = {
-    {  8, [[Miau miau - kot chodzi wlasnymi drogami. !@#$%^&*()]] },
-    { 10, [[Mruczek, Filemon, Bonifacy 123 kocury +-=_~`|/\]] },
-    { 12, [[abcdefghzxc,.-= oraz !@#$%^&*()_+[]{};:'"<>/?~`|]] },
-    { 14, [[Illegal1 O0 rn/m cl/d ijl1 .,:;!? -- kropki i myslniki]] },
-    { 18, [[Kotek zjadl 0.5 miski. Wazyl 4-5 kg! (mruuu...) #1]] },
+-- Every row is its own {size, text} pair. Sizes and samples used to be separate
+-- tables joined with math.mod, which meant a long text could land on a large size
+-- and run outside the frame.
+local LINES = {
+    {  8, [[The quick brown fox jumps over the lazy dog. !@#$%^&*()]] },
+    { 10, [[Sphinx of black quartz, judge my vow 123 +-=_~`|/\]] },
+    { 12, [[abcdefghzxc,.-= and !@#$%^&*()_+[]{};:'"<>/?~`|]] },
+    { 14, [[Illegal1 O0 rn/m cl/d ijl1 .,:;!? -- dots and dashes]] },
+    { 18, [[The cat ate 0.5 of a bowl. It weighed 4-5 kg! (purr...) #1]] },
     { 24, [[abcdefghzxc,.-=+*&%$#@! 0123456789 <>[]{}()]] },
-    { 32, [[MIAU ,.-=_ 0123 !@#$%^&*()]] },
+    { 32, [[MEOW ,.-=_ 0123 !@#$%^&*()]] },
     { 48, [[abc ,.-=_ !@#$%&* 123]] },
     { 72, [[Aa ,.-=_ !@#$% 12]] },
 }
 
--- Kroje warte porownania: kazdy inaczej wyglada po przejsciu na MSDF.
-local KROJE = {
+-- Typefaces worth comparing: each looks different once it goes through MSDF.
+local FONTS = {
     { "FRIZQT",  [[Fonts\FRIZQT__.ttf]] },
     { "ARIALN",  [[Fonts\ARIALN.ttf]] },
     { "MORPHEUS",[[Fonts\MORPHEUS.ttf]] },
 }
 
-local ramka
-local aktywnyKrojIdx = 1
+local frame
+local activeFontIdx = 1
 
-local function UstawTeksty()
-    local sciezka = KROJE[aktywnyKrojIdx][2]
-    for i = 1, table.getn(ramka.linie) do
-        local l = ramka.linie[i]
-        local ok = l:SetFont(sciezka, l.rozmiar)
+local function ApplyTexts()
+    local path = FONTS[activeFontIdx][2]
+    for i = 1, table.getn(frame.lines) do
+        local l = frame.lines[i]
+        local ok = l:SetFont(path, l.fontSize)
         if not ok then
-            -- SetFont zwraca status, wiec nadaje sie na kontrole:
-            -- gdy kroj nie istnieje, wracamy na domyslny zamiast zostawic pustke.
-            l:SetFont([[Fonts\FRIZQT__.ttf]], l.rozmiar)
+            -- SetFont returns a status, so it works as a check: when the typeface
+            -- does not exist we fall back to the default instead of leaving a blank.
+            l:SetFont([[Fonts\FRIZQT__.ttf]], l.fontSize)
         end
     end
-    ramka.naglowek:SetText("Lexara - " .. KROJE[aktywnyKrojIdx][1] ..
-        "  (CTRL+ALT+F11 przelacza renderer)")
+    frame.header:SetText("Lexara - " .. FONTS[activeFontIdx][1] ..
+        "  (CTRL+ALT+F11 toggles the renderer)")
 end
 
-local function Buduj()
+local function Build()
     local f = CreateFrame("Frame", "LexaraCompareFrame", UIParent)
     f:SetWidth(900)
-    f:SetHeight(60)  -- realna wysokosc ustawiana po zbudowaniu wierszy
+    f:SetHeight(60)  -- the real height is set once the rows have been built
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     f:SetBackdrop({
         bgFile = [[Interface\Tooltips\UI-Tooltip-Background]],
@@ -64,45 +65,45 @@ local function Buduj()
     f:SetScript("OnDragStart", function() this:StartMoving() end)
     f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
 
-    local naglowek = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    naglowek:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -10)
-    f.naglowek = naglowek
+    local header = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    header:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -10)
+    f.header = header
 
-    -- Prawy przycisk myszy przelacza kroj - bez dodatkowych kontrolek.
+    -- Right mouse button cycles the typeface - no extra controls needed.
     f:SetScript("OnMouseUp", function()
         if arg1 == "RightButton" then
-            aktywnyKrojIdx = aktywnyKrojIdx + 1
-            if aktywnyKrojIdx > table.getn(KROJE) then aktywnyKrojIdx = 1 end
-            UstawTeksty()
+            activeFontIdx = activeFontIdx + 1
+            if activeFontIdx > table.getn(FONTS) then activeFontIdx = 1 end
+            ApplyTexts()
         end
     end)
 
-    f.linie = {}
+    f.lines = {}
     local y = -32
-    for i = 1, table.getn(LINIE) do
-        local rozmiar = LINIE[i][1]
-        local tresc = LINIE[i][2]
+    for i = 1, table.getn(LINES) do
+        local size = LINES[i][1]
+        local text = LINES[i][2]
 
-        local etykieta = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-        etykieta:SetPoint("TOPLEFT", f, "TOPLEFT", 12, y)
-        etykieta:SetText(rozmiar .. "px")
-        etykieta:SetWidth(38)
-        etykieta:SetJustifyH("RIGHT")
+        local label = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        label:SetPoint("TOPLEFT", f, "TOPLEFT", 12, y)
+        label:SetText(size .. "px")
+        label:SetWidth(38)
+        label:SetJustifyH("RIGHT")
 
-        -- 1.12: SetText na FontString BEZ ustawionej czcionki konczy sie bledem
-        -- Lua. Dziedziczymy wiec szablon przy tworzeniu, a SetFont tylko
-        -- nadpisuje kroj i rozmiar.
-        local linia = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        linia:SetPoint("TOPLEFT", f, "TOPLEFT", 56, y)
-        linia:SetJustifyH("LEFT")
-        -- Bez ograniczenia szerokosci dluzsze linie wychodzily poza obramowanie.
-        linia:SetWidth(830)
-        linia:SetHeight(rozmiar + 6)
-        linia:SetText(tresc)
-        linia.rozmiar = rozmiar
-        table.insert(f.linie, linia)
+        -- 1.12: calling SetText on a FontString WITHOUT a font set ends in a Lua
+        -- error. So we inherit a template at creation time and SetFont only
+        -- overrides the typeface and the size.
+        local line = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        line:SetPoint("TOPLEFT", f, "TOPLEFT", 56, y)
+        line:SetJustifyH("LEFT")
+        -- Without a width limit the longer lines ran outside the border.
+        line:SetWidth(830)
+        line:SetHeight(size + 6)
+        line:SetText(text)
+        line.fontSize = size
+        table.insert(f.lines, line)
 
-        y = y - (rozmiar + 12)
+        y = y - (size + 12)
     end
 
     f:SetHeight(-y + 16)
@@ -113,17 +114,17 @@ end
 SLASH_LEXARA1 = "/lexara"
 SLASH_LEXARA2 = "/lex"
 SlashCmdList["LEXARA"] = function()
-    if not ramka then
-        ramka = Buduj()
-        UstawTeksty()
+    if not frame then
+        frame = Build()
+        ApplyTexts()
     end
-    if ramka:IsShown() then
-        ramka:Hide()
+    if frame:IsShown() then
+        frame:Hide()
     else
-        ramka:Show()
+        frame:Show()
     end
 end
 
 DEFAULT_CHAT_FRAME:AddMessage(
-    "|cff66ccffLexaraCompare|r wczytany. /lexara otwiera panel, " ..
-    "prawy przycisk na panelu zmienia kroj, CTRL+ALT+F11 przelacza renderer.")
+    "|cff66ccffLexaraCompare|r loaded. /lexara opens the panel, " ..
+    "right-click on the panel changes the typeface, CTRL+ALT+F11 toggles the renderer.")

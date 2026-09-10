@@ -1,10 +1,10 @@
 #pragma once
 
-// Latka na crash klienta 1.12 przy tekstury, ktorej nie da sie wczytac.
-// Szczegoly i disasm: docs/tex-null-fill.md.
+// A patch for the 1.12 client crash on a texture that cannot be loaded.
+// Details and disassembly: docs/tex-null-fill.md.
 namespace TexNullFill {
-    // Wola sie z Entry.cpp, WEWNATRZ otwartej transakcji Detours i PO
-    // MSDF::initialize() (to ono wczytuje lexara112.cfg). Latka jest
-    // niezalezna od msdf_enabled - dotyczy tekstur, nie czcionek.
+    // Called from Entry.cpp, INSIDE an open Detours transaction and AFTER
+    // MSDF::initialize() (which is what loads lexara112.cfg). The patch is
+    // independent of msdf_enabled - it concerns textures, not fonts.
     void initialize();
 }

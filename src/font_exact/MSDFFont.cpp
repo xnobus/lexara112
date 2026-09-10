@@ -27,11 +27,12 @@ MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize, FT_L
 }
 
 MSDFFont::~MSDFFont() {
-    // [1.12] Strony sa wspolne, wiec ich TU NIE zwalniamy - zabralibysmy je
-    // krojom, ktore dalej rysuja. Trzeba za to wymiesc z nich wpisy tego
-    // kroju, bo trzymaja `this` i eksmisja siegnelaby po martwy obiekt.
-    // Straznik na liczniku: kroj, ktory nic nie ulozyl (kazdy MSDFFont
-    // pregenu), nie dotyka stanu dzielonego w ogole.
+    // [1.12] The pages are shared, so we do NOT release them HERE - that would
+    // take them away from typefaces that are still drawing. What we must do is
+    // sweep this typeface's entries out of them, because they hold `this` and an
+    // eviction would reach into a dead object.
+    // Guarded on the counter: a typeface that laid nothing out (every pregen
+    // MSDFFont) does not touch shared state at all.
     if (m_atlasEntryCount) ForgetFontEntries(this);
     m_glyphPool.clear();
     m_cache.reset();
@@ -63,8 +64,8 @@ void MSDFFont::Unregister(FT_Face face) {
 }
 
 void MSDFFont::ClearAllCache() {
-    // Wolane z D3D::RegisterOnDestroy - urzadzenie znika, wiec tekstury stron
-    // trzeba puscic, a wszystkie kroje straca swoje glify naraz.
+    // Called from D3D::RegisterOnDestroy - the device is going away, so the page
+    // textures have to be let go, and every typeface loses its glyphs at once.
     for (auto& handle : s_fontHandles | std::views::values) {
         if (handle) {
             handle->m_glyphPool.clear();
@@ -81,13 +82,13 @@ void MSDFFont::Shutdown() {
     s_atlasPages.clear();
 }
 
-// [1.12] Uniewaznienie zamiast usuniecia. m_glyphPool to mapa gesta
-// (unordered_dense) - erase przestawia w niej inne elementy, a UploadGlyphToAtlas
-// dostaje `GlyphMetrics&` z tej wlasnie mapy i trzyma ta referencje przez cala
-// eksmisje. Zerowanie UV nie rusza ukladu mapy, a GetGlyph i tak rozpoznaje
-// wpis o zerowym u1/v1 jako "nigdy nie wgrany" i wysyla go do atlasu ponownie -
-// ta sciezka ponowienia juz istnieje i jest przechodzona przy kazdym starcie
-// przed pierwsza klatka.
+// [1.12] Invalidation instead of removal. m_glyphPool is a dense map
+// (unordered_dense) - erase moves other elements around in it, and
+// UploadGlyphToAtlas receives a `GlyphMetrics&` from that very map and holds that
+// reference across the whole eviction. Zeroing the UVs does not disturb the map's
+// layout, and GetGlyph already recognises an entry with a zero u1/v1 as "never
+// uploaded" and sends it to the atlas again - that retry path already exists and is
+// walked at every start-up, before the first frame.
 void MSDFFont::InvalidateGlyph(uint32_t codepoint) {
     auto it = m_glyphPool.find(codepoint);
     if (it == m_glyphPool.end()) return;
@@ -105,10 +106,10 @@ void MSDFFont::ForgetFontEntries(MSDFFont* font) {
     }
 }
 
-// [1.12] Czysci najstarsza strone i uniewaznia WSZYSTKIE lezace na niej glify,
-// niezaleznie od tego, czyje sa. Licznik eksmisji jest globalny, wiec
-// CheckGeometryHk przebuduje geometrie kazdego napisu, nie tylko tego kroju,
-// ktory akurat wywolal eksmisje - i o to chodzi, bo strona miesza kroje.
+// [1.12] Clears the oldest page and invalidates EVERY glyph sitting on it,
+// whoever owns it. The eviction counter is global, so CheckGeometryHk rebuilds the
+// geometry of every string, not just of the typeface that happened to trigger the
+// eviction - which is the point, because a page mixes typefaces.
 int MSDFFont::EvictOldestPage() {
     if (s_atlasPages.empty()) return -1;
     if (s_oldestPage >= s_atlasPages.size()) s_oldestPage = 0;
@@ -136,58 +137,58 @@ int MSDFFont::EvictOldestPage() {
     return cleared;
 }
 
-// [1.12] Liczniki wyjsc z GetGlyph. Poprzednia sonda miala straznik
-// "static bool" i wypisywala TYLKO pierwsze wystapienie kazdej przyczyny -
-// przez co rozklad byl niewidoczny, a jedyny wpis w logu (spacja) byl
-// przypadkiem najmniej istotnym. Licznik pokazuje wszystkie naraz.
+// [1.12] Counters for the ways GetGlyph can exit. The previous probe had a
+// "static bool" guard and reported ONLY the first occurrence of each cause - which
+// hid the distribution, and the single entry that did reach the log (a space) was
+// the least interesting case of all. Counters show them all at once.
 static int gNullPixelSize = 0, gNullLoadGlyph = 0, gNullUploadCache = 0,
            gNullUploadGen = 0, gNullRetry = 0, gOkCache = 0, gOkGen = 0,
            gOkPool = 0, gNoOutline = 0, gTotal = 0;
 
 static void DumpGlyphStats() {
-    Log("[MSDF] GetGlyph po %d wywolaniach: pool=%d cache=%d gen=%d bezKonturu=%d",
+    Log("[MSDF] GetGlyph after %d calls: pool=%d cache=%d gen=%d noOutline=%d",
         gTotal, gOkPool, gOkCache, gOkGen, gNoOutline);
     Log("       NULL: pixelSize=%d loadGlyph=%d uploadCache=%d uploadGen=%d retry=%d",
         gNullPixelSize, gNullLoadGlyph, gNullUploadCache, gNullUploadGen, gNullRetry);
 }
 
 const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
-    // [1.12] Bylo co 200 wywolan. Przy 2,3 mln wywolan na sesje dawalo to
-    // ponad 11 tys. otwarc pliku logu i samo w sobie psulo wydajnosc.
-    // [1.12] Zrzut statystyk tylko na zadanie (DumpGlyphStats z debuggera lub
-    // po dolozeniu wywolania) - okresowe logowanie samo kosztowalo wiecej niz
-    // mierzylo: przy 2,3 mln wywolan na sesje bylo to tysiace otwarc pliku.
+    // [1.12] This used to run every 200 calls. At 2.3 million calls per session
+    // that meant over 11,000 opens of the log file and hurt performance by itself.
+    // [1.12] Statistics are now dumped on demand only (DumpGlyphStats from a
+    // debugger, or after adding a call) - periodic logging cost more than it
+    // measured: at 2.3 million calls per session it meant thousands of file opens.
     ++gTotal;
     auto pit = m_glyphPool.find(codepoint);
     if (pit != m_glyphPool.end()) {
-        // [1.12] Wpis o zerowym UV, ale niezerowym rozmiarze, to glif, ktorego
-        // upload do atlasu sie NIE UDAL - najczesciej dlatego, ze przy jego
-        // generowaniu nie bylo jeszcze urzadzenia D3D (prefetch leci z
-        // CheckGeometry, czyli przed pierwsza klatka klienta, a urzadzenie
-        // lapiemy dopiero na jego EndScene). Bez ponowienia taki glif zostawal
-        // z UV (0,0)-(0,0) na zawsze: shader probkowal rog atlasu, dostawal
-        // sd = 0 i przy wlaczonej obwodce malowal PELNY CZARNY prostokat.
-        // Wlasnie to bylo widac zamiast liter.
+        // [1.12] An entry with zero UVs but a non-zero size is a glyph whose
+        // upload to the atlas FAILED - usually because there was no D3D device yet
+        // when it was generated (the prefetch runs from CheckGeometry, i.e. before
+        // the client's first frame, while we only catch the device on its
+        // EndScene). Without a retry such a glyph kept UVs of (0,0)-(0,0) forever:
+        // the shader sampled the corner of the atlas, got sd = 0 and, with the
+        // outline enabled, painted a SOLID BLACK rectangle.
+        // That is exactly what was showing up instead of letters.
         GlyphMetrics& cached = pit->second;
         const bool neverUploaded = (cached.u1 == 0.0f && cached.v1 == 0.0f);
         if (neverUploaded && cached.width > 0 && cached.height > 0) {
-            // [1.12] pixelData jest WAZNE TYLKO DO KONCA BIEZACEGO WYWOLANIA.
-            // Wskazuje albo w bufor `storage`, ktory zaraz po uploadzie idzie
-            // do MSDFCache::StoreGlyph i ginie przy najblizszym
-            // FlushPendingWrites, albo w blok pliku cache zmapowany przez
-            // MSDFManager, ktory tez potrafi zniknac. Dlatego udany upload
-            // zeruje ten wskaznik (patrz koniec UploadGlyphToAtlas), a tutaj
-            // NULL znaczy "trzeba wziac piksele od nowa".
+            // [1.12] pixelData IS ONLY VALID UNTIL THE END OF THE CURRENT CALL.
+            // It points either into the `storage` buffer, which right after the
+            // upload goes to MSDFCache::StoreGlyph and dies at the next
+            // FlushPendingWrites, or into a block of the cache file mapped by
+            // MSDFManager, which can also disappear. That is why a successful
+            // upload nulls this pointer (see the end of UploadGlyphToAtlas), and
+            // why NULL here means "the pixels have to be fetched again".
             //
-            // Bez tego eksmisja ze wspolnego atlasu byla wyrokiem: uniewazniony
-            // glif wracal tedy i memcpy w petli wierszy czytalo zwolniona
-            // pamiec. Crash 2026-09-09 22:59 (`ECX=EDX=0x180` = width*4 przy
-            // width=96, zrodlo `ESI` niezmapowane) - regresja po wprowadzeniu
-            // wspolnego atlasu.
+            // Without this, eviction from the shared atlas was a death sentence: an
+            // invalidated glyph came back through here and the memcpy in the row
+            // loop read freed memory. Crash 2026-09-09 22:59 (`ECX=EDX=0x180` =
+            // width*4 at width=96, source `ESI` unmapped) - a regression introduced
+            // together with the shared atlas.
             //
-            // Kasujemy wpis i wchodzimy w pelna sciezke (cache -> generacja).
-            // To bezpieczne mimo gestej mapy: zadna referencja do puli nie jest
-            // jeszcze w rekach ani naszych, ani wolajacego.
+            // We drop the entry and take the full path (cache -> generation). That
+            // is safe despite the dense map: no reference into the pool is in
+            // anyone's hands yet, ours or the caller's.
             if (!cached.pixelData) {
                 m_glyphPool.erase(pit);
                 return GetGlyph(codepoint);
@@ -202,8 +203,8 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
     GlyphMetrics& metrics = it->second;
 
     if (m_cache->TryLoadGlyph(codepoint, metrics)) {
-        // [1.12] Wynik uploadu MUSI byc sprawdzony. Wczesniej byl ignorowany,
-        // wiec nieudany upload zostawial w buforze wpis z zerowym UV.
+        // [1.12] The upload result MUST be checked. It used to be ignored, so a
+        // failed upload left an entry with zero UVs in the pool.
         if (!UploadGlyphToAtlas(metrics, codepoint)) {
             ++gNullUploadCache;
             m_glyphPool.erase(it);
@@ -244,7 +245,7 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
 
         if (w == 0 || h == 0) {
             static int n = 0;
-            if (++n <= 10) Log("[MSDF] glif kod=%u ma ZEROWY bbox (w=%u h=%u) - zostanie pusty", codepoint, w, h);
+            if (++n <= 10) Log("[MSDF] glyph code=%u has a ZERO bbox (w=%u h=%u) - it will stay empty", codepoint, w, h);
         }
         if (w > 0 && h > 0) {
             uint16_t sdfW = w + 2 * MSDF::SDF_SPREAD;
@@ -252,10 +253,10 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
             storage.ownedPixelData.reserve(static_cast<size_t>(sdfW) * sdfH * 4);
             const bool wygenerowano = GenerateMSDF(storage.ownedPixelData, codepoint, sdfW, sdfH);
             if (!wygenerowano) {
-                // [1.12] Cicha porazka w oryginale: blok byl pomijany, glif
-                // zostawal z zerowym rozmiarem i znikal bez sladu w logu.
+                // [1.12] A silent failure in the original: the block was skipped,
+                // the glyph kept a zero size and vanished without a trace in the log.
                 static int n = 0;
-                if (++n <= 10) Log("[MSDF] GenerateMSDF ODMOWIL dla kodu=%u (sdf %ux%u)", codepoint, sdfW, sdfH);
+                if (++n <= 10) Log("[MSDF] GenerateMSDF REFUSED for code=%u (sdf %ux%u)", codepoint, sdfW, sdfH);
             }
             if (wygenerowano) {
                 storage.width = sdfW;
@@ -266,7 +267,7 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
                 metrics.bitmapLeft = storage.bitmapLeft;
                 metrics.bitmapTop = storage.bitmapTop;
                 metrics.pixelData = storage.ownedPixelData.data();
-                // [1.12] jw. - nieudany upload nie moze zostac zapamietany
+                // [1.12] as above - a failed upload must not be remembered
                 if (!UploadGlyphToAtlas(metrics, codepoint)) {
                     ++gNullUploadGen;
                     m_glyphPool.erase(codepoint);
@@ -296,35 +297,35 @@ bool MSDFFont::CreateAtlasPage() {
         .format = MSDF::D3DFMT,
         .pool = D3DPOOL_MANAGED
         })) {
-        // [1.12] Ta sciezka byla jedyna nieoprzyrzadowana i to wlasnie ona
-        // odpowiadala za 392 odrzucone glify: pierwsza strona atlasu sie
-        // zapelnia, a kolejna nie powstaje.
-        Log("[MSDF] CreateAtlasPage: CreateTexture %ux%u ODMOWIL (stron dotad=%u, max=%u)",
+        // [1.12] This was the one path with no instrumentation, and it was the one
+        // responsible for 392 rejected glyphs: the first atlas page fills up and the
+        // next one is never created.
+        Log("[MSDF] CreateAtlasPage: CreateTexture %ux%u REFUSED (pages so far=%u, max=%u)",
             MSDF::ATLAS_SIZE, MSDF::ATLAS_SIZE,
             (unsigned)s_atlasPages.size(), (unsigned)MSDF::MAX_ATLAS_PAGES);
         return false;
     }
-    Log("[MSDF] CreateAtlasPage: strona %u utworzona (tekstura=%p, atlas wspolny)",
+    Log("[MSDF] CreateAtlasPage: page %u created (texture=%p, shared atlas)",
         (unsigned)s_atlasPages.size(), (void*)page->texture);
     s_atlasPages.push_back(std::move(page));
     return true;
 }
 
 bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
-    // [1.12] Rozdzielone dwa przypadki, ktore oryginal traktowal tak samo.
-    // Glif PUSTY (spacja) to sukces - nie ma czego zapisywac. Ale glif
-    // o niezerowym rozmiarze BEZ pikseli to porazka: wczesniej zwracalo to
-    // "sukces", wiec wpis zostawal w buforze z UV (0,0)-(0,0) na zawsze
-    // i litera bywala niewidoczna. To pasuje do brakujacych liter w UI.
+    // [1.12] Two cases the original treated identically are now separated.
+    // An EMPTY glyph (a space) is a success - there is nothing to write. But a
+    // glyph with a non-zero size and NO pixels is a failure: this used to return
+    // "success", so the entry stayed in the pool with UVs of (0,0)-(0,0) forever
+    // and the letter could be invisible. That matches the missing letters in the UI.
     if (metrics.width > 0 && metrics.height > 0 && !metrics.pixelData) {
         static int n = 0;
-        if (++n <= 5) Log("[MSDF] upload: rozmiar %ux%u ale BRAK pikseli (kod=%u) - odrzucam",
+        if (++n <= 5) Log("[MSDF] upload: size %ux%u but NO pixels (code=%u) - rejecting",
                           metrics.width, metrics.height, codepoint);
         return false;
     }
     if (!metrics.pixelData || metrics.width == 0 || metrics.height == 0) {
         static bool l = false;
-        if (!l) { l = true; Log("[MSDF] upload: brak pikseli (kod=%u px=%p w=%u h=%u) - zwracam sukces bez zapisu",
+        if (!l) { l = true; Log("[MSDF] upload: no pixels (code=%u px=%p w=%u h=%u) - reporting success without a write",
                                 codepoint, (const void*)metrics.pixelData, metrics.width, metrics.height); }
         return true;
     }
@@ -351,11 +352,11 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
         }
     }
     if (pageIndex == -1) {
-        // [1.12] Najpierw proba dolozenia strony, dopiero potem eksmisja -
-        // i eksmisja jest teraz TAKZE odpowiedzia na odmowe CreateTexture,
-        // nie tylko na osiagniecie MAX_ATLAS_PAGES. Wczesniej odmowa
-        // alokacji konczyla sie zwroceniem false, czyli glif przepadal na
-        // dobre; skoro strony sa juz wspolne, mamy czym sie podzielic.
+        // [1.12] First try to add a page, and only then evict - and eviction is
+        // now ALSO the answer to a CreateTexture refusal, not just to reaching
+        // MAX_ATLAS_PAGES. A refused allocation used to end in returning false,
+        // i.e. the glyph was lost for good; now that the pages are shared, there is
+        // something to share out.
         if (s_atlasPages.size() < MSDF::MAX_ATLAS_PAGES && CreateAtlasPage()) {
             pageIndex = static_cast<int16_t>(s_atlasPages.size() - 1);
             targetPage = s_atlasPages.back().get();
@@ -367,25 +368,25 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
             targetPage = s_atlasPages[cleared].get();
         }
     }
-    // [1.12] Sondy na KAZDEJ sciezce porazki - bez nich "upload sie nie udal"
-    // to za malo, zeby cokolwiek naprawic.
+    // [1.12] A probe on EVERY failure path - without them "the upload failed" is
+    // not enough to fix anything.
     if (pageIndex == -1 || !targetPage) {
-        static bool l = false; if (!l) { l = true; Log("[MSDF] upload: brak strony atlasu (kod=%u)", codepoint); }
+        static bool l = false; if (!l) { l = true; Log("[MSDF] upload: no atlas page (code=%u)", codepoint); }
         return false;
     }
     if (!targetPage->texture) {
-        static bool l = false; if (!l) { l = true; Log("[MSDF] upload: strona bez tekstury (kod=%u)", codepoint); }
+        static bool l = false; if (!l) { l = true; Log("[MSDF] upload: page without a texture (code=%u)", codepoint); }
         return false;
     }
 
     D3DLOCKED_RECT lockedRect;
     const HRESULT hrLock = targetPage->texture->LockRect(0, &lockedRect, nullptr, 0);
     if (FAILED(hrLock)) {
-        static bool l = false; if (!l) { l = true; Log("[MSDF] upload: LockRect hr=0x%08lX (kod=%u)", hrLock, codepoint); }
+        static bool l = false; if (!l) { l = true; Log("[MSDF] upload: LockRect hr=0x%08lX (code=%u)", hrLock, codepoint); }
         return false;
     }
     if (lockedRect.Pitch < metrics.width * 4) {
-        static bool l = false; if (!l) { l = true; Log("[MSDF] upload: pitch=%d < %d (kod=%u)", lockedRect.Pitch, metrics.width * 4, codepoint); }
+        static bool l = false; if (!l) { l = true; Log("[MSDF] upload: pitch=%d < %d (code=%u)", lockedRect.Pitch, metrics.width * 4, codepoint); }
         targetPage->texture->UnlockRect(0);
         return false;
     }
@@ -412,10 +413,10 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
     targetPage->entries.emplace_back(this, codepoint);
     ++m_atlasEntryCount;
 
-    // [1.12] Piksele sa juz w atlasie, a ten wskaznik przezyje najwyzej do
-    // najblizszego zrzutu cache'u. Zerujemy go, zeby stale odczytanie bylo
-    // niemozliwe z konstrukcji - GetGlyph rozpoznaje NULL i bierze piksele
-    // od nowa, zamiast czytac zwolniona pamiec.
+    // [1.12] The pixels are in the atlas now, and this pointer survives at most
+    // until the next cache flush. We null it so that a stale read is impossible by
+    // construction - GetGlyph recognises the NULL and fetches the pixels again
+    // instead of reading freed memory.
     metrics.pixelData = nullptr;
 
     return true;
@@ -432,7 +433,7 @@ bool MSDFFont::GenerateMSDF(std::vector<uint8_t>& outData, uint32_t codepoint, i
         return true;
     }
 
-    MSDFCompat::ResolveShapeGeometry(shape);  // [1.12] msdfgen bez Skii - patrz MSDFCompat.h
+    MSDFCompat::ResolveShapeGeometry(shape);  // [1.12] msdfgen without Skia - see MSDFCompat.h
     msdfgen::edgeColoringInkTrap(shape, 3.0, 0);
 
     auto bounds = shape.getBounds();
