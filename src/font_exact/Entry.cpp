@@ -1,3 +1,4 @@
+#include "CharTexMips.h"
 #include "D3D.h"
 #include "Hooks.h"
 #include "MSDF.h"
@@ -37,6 +38,7 @@ namespace {
         // msdf_enabled gate: it concerns textures, not fonts, and is meant to work
         // even with the MSDF renderer disabled.
         TexNullFill::initialize();
+        CharTexMips::initialize();
 
         status = DetourTransactionCommit();
         if (status != NO_ERROR) {

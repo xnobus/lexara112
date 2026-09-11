@@ -46,6 +46,12 @@ msdf_enabled=0
 # Independent of msdf_enabled.
 site_texnullfill=1
 
+# --- patch for the 0x0047801D crash (an oversized character texture) ---
+# Caps the mip levels pasted into the 256x256 skin canvas to its own 9. A 512x256
+# component (e.g. from a hi-res texture patch) otherwise writes through a pixel
+# value on its 10th level. 0 = the crash returns. Independent of msdf_enabled.
+site_chartexmips=1
+
 # ---------------------------------------------------------------------------
 # The D3D9 stand-in device - see docs/animation-stutter-M2.md
 # ---------------------------------------------------------------------------
