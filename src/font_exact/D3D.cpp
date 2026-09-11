@@ -255,12 +255,11 @@ namespace D3D {
         IDirect3DDevice9* g_device = nullptr;
 
         // [1.12] Was: a hook on the 3.3.5 client's CGxDevice::DeviceCreate, which
-        // then read the device out of the global at 00C5DF88. The 1.12 client has
-        // no such global (checked - 00C0F464 nearby is viewport state, not the
-        // device), and d3d9.dll is loaded DYNAMICALLY - it is not in the import
-        // table. So the device arrives here through the chain LoadLibrary ->
-        // Direct3DCreate9 -> IDirect3D9::CreateDevice. Zero client addresses in
-        // this entire layer.
+        // then read the device out of the global at 00C5DF88. d3d9.dll is loaded
+        // DYNAMICALLY in 1.12 - it is not in the import table - so the device
+        // arrives here through the chain LoadLibrary -> Direct3DCreate9 ->
+        // IDirect3D9::CreateDevice. That chain can miss the client's device, and
+        // then GetDevice reads the client's own pointer instead (ReadClientDevice).
         void InstallDeviceHooks(IDirect3DDevice9* device) {
             if (g_isProcessTerminating || !device) return;
             g_device = device;
@@ -421,6 +420,23 @@ namespace D3D {
         // we are permanently bypassed, and that would explain everything.
         void** g_ifaceVtbl = nullptr;
         void*  g_ourCreateDevice = nullptr;
+        // The module whose image holds g_ifaceVtbl. d3d9.dll gets unloaded and
+        // loaded again before the client creates its device. At the SAME base (seen
+        // here) the fresh image has the table at the same address, so reclaiming
+        // slot 16 there is right - that is how the device used to be caught. At
+        // ANOTHER base (a user's log: Direct3DCreate9 at 5EF314B0, then 5EEF14B0,
+        // same path) the new image covers the old table's address, and the guard
+        // read "83440486" out of the middle of it as a foreign CreateDevice and
+        // wrote our pointer there - into the live DXVK. The owner check stops that.
+        HMODULE g_ifaceModule = nullptr;
+
+        // The module whose image contains `addr`, or nullptr when none does.
+        HMODULE ModuleAt(const void* addr) {
+            HMODULE mod = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    static_cast<LPCWSTR>(addr), &mod)) return nullptr;
+            return mod;
+        }
 
         void PatchInterfaceVtable(void* d3dRaw, const char* origin) {
             IDirect3D9* d3d = reinterpret_cast<IDirect3D9*>(d3dRaw);
@@ -444,6 +460,7 @@ namespace D3D {
                         vtbl[16] = reinterpret_cast<void*>(&hkCreateDevice);
                         DWORD tmp = 0;
                         VirtualProtect(&vtbl[16], sizeof(void*), oldProt, &tmp);
+                        g_ifaceModule = ModuleAt(vtbl);
                         g_ifaceVtbl = vtbl;
                         g_ourCreateDevice = vtbl[16];
                         Log("[MSDF] vtbl[16] swapped: %p -> %p",
@@ -493,6 +510,23 @@ namespace D3D {
         // there is no telling which mod installs its hooks, or when.
         void ReassertInterfaceHook() {
             if (!g_ifaceVtbl || !g_ourCreateDevice) return;
+            if (const HMODULE owner = ModuleAt(&g_ifaceVtbl[16]); owner != g_ifaceModule) {
+                // Nothing mapped there: unloaded, maybe coming back at the same base.
+                static bool s_loggedUnmapped = false;
+                if (!owner) {
+                    if (!s_loggedUnmapped) {
+                        s_loggedUnmapped = true;
+                        Log("[MSDF] vtbl[16] guard: the module holding the table (%p) was unloaded - waiting",
+                            g_ifaceModule);
+                    }
+                    return;
+                }
+                Log("[MSDF] vtbl[16] guard: module %p is mapped over the table of %p (reloaded at another base)"
+                    " - not touching it; the device will be read from the client",
+                    owner, g_ifaceModule);
+                g_ifaceVtbl = nullptr;
+                return;
+            }
             __try {
                 void* current = g_ifaceVtbl[16];
                 if (current == g_ourCreateDevice) return;
@@ -525,6 +559,56 @@ namespace D3D {
             Log(g_device ? "[MSDF] vtbl[16] guard: device caught, thread exiting"
                          : "[MSDF] vtbl[16] guard: device never appeared, thread exiting");
             return 0;
+        }
+
+        // [1.12] The client's own pointer to its D3D device. The capture chain above
+        // missed it in a user's session: d3d9.dll was unloaded and loaded again at
+        // another base, the second copy was never hooked ("detour stays on the
+        // first"), the client created its device through it - and every piece of
+        // text disappeared, because the glyphs were already rewritten for our
+        // atlas while nothing ever bound our shaders ("WriteGeometry: NO DEVICE").
+        //
+        // Addresses from ClassicAPI (src/Offsets.h), checked against WoW.exe:
+        //   00C0ED38  CGxDevice* - the Gx layer's global device pointer (138 uses)
+        //   00809EF8  CGxDeviceD3d vtable, stored by its ctor at 00598D05; the
+        //             OpenGL device has another one, and then we return nullptr
+        //   +0x38A8   IDirect3DDevice9* - the ppDevice of the client's own
+        //             IDirect3D9::CreateDevice (`lea edi,[esi+38A8]` at 00599603,
+        //             `call [ecx+40h]` at 00599627)
+        constexpr uintptr_t GX_DEVICE_PTR = 0x00C0ED38;
+        constexpr uintptr_t GX_DEVICE_D3D_VTBL = 0x00809EF8;
+        constexpr uintptr_t GXDEVD3D_DEVICE9 = 0x38A8;
+
+        IDirect3DDevice9* ReadClientDevice() {
+            __try {
+                const uint8_t* gx = *reinterpret_cast<const uint8_t* const*>(GX_DEVICE_PTR);
+                if (!gx || *reinterpret_cast<const uintptr_t*>(gx) != GX_DEVICE_D3D_VTBL) return nullptr;
+                return *reinterpret_cast<IDirect3DDevice9* const*>(gx + GXDEVD3D_DEVICE9);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                return nullptr;
+            }
+        }
+
+        // [1.12] The client's pointer wins over whatever the capture chain caught:
+        // it is the device the client actually draws with. client_device=0 leaves
+        // only the chain, as before. (Kept out of GetDevice: its __try forbids the
+        // static below.)
+        void SyncClientDevice() {
+            static const bool s_enabled = MSDF::CfgFlag("client_device");
+            if (!s_enabled) return;
+            IDirect3DDevice9* client = ReadClientDevice();
+            static bool s_logged = false;
+            if (client && !s_logged) {
+                s_logged = true;
+                Log("[MSDF] client device pointer: %p, capture chain: %p%s", client, g_device,
+                    client == g_device ? " (same)" : "");
+            }
+            if (client && client != g_device) {
+                Log("[MSDF] device read from the client (CGxDeviceD3d+0x38A8): %p, the capture chain had %p",
+                    client, g_device);
+                InstallDeviceHooks(client);
+            }
         }
 
         void StartVtableGuard() {
@@ -947,9 +1031,11 @@ namespace {
 
     IDirect3DDevice9* GetDevice() {
         if (!g_device) CaptureDeviceViaSharedVtable();
+        SyncClientDevice();
         __try {
             // [1.12] Was: *(0x00C5DF88) + 0x397C, i.e. the 3.3.5 client's CGxDevice
-            // global. Here the device is stored by the CreateDevice hook.
+            // global. Here the device is stored by the CreateDevice hook, or read
+            // from the client's own pointer by SyncClientDevice.
             IDirect3DDevice9* device = g_device;
             if (device && device->TestCooperativeLevel() == D3D_OK) {
                 return device;

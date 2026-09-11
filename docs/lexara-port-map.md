@@ -419,6 +419,13 @@ search for an equivalent global **failed and was abandoned** - `00C0F464`, which
 came out of walking the call chain around `DrawIndexedPrimitive`, turned out to be
 a set of viewport state scalars, not a device object.
 
+**Correction (2026-09-11):** the global exists - `00C0ED38` is the Gx layer's
+`CGxDevice*` (138 references), found in ClassicAPI's `Offsets.h`. For the D3D
+device its vtable is `00809EF8` (stored by the ctor at `00598D05`) and the
+`IDirect3DDevice9*` sits at `+0x38A8` - the `ppDevice` of the client's own
+`CreateDevice` (`lea edi,[esi+38A8]` at `00599603`, `call [ecx+40h]` at
+`00599627`). It is now the fallback when the chain below misses (bug 10).
+
 Instead of searching further: **1.12's `WoW.exe` has no d3d9.dll in its import
 table** (its only graphics import is `opengl32.dll`), but it does hold the strings
 `d3d9.dll` and `Direct3DCreate9` in its data - so it loads it dynamically. Hence
@@ -514,7 +521,7 @@ the UI not painted with the font shader; (4) texture memory against
 letters sit where they should. Below is what had to be fixed along the way - every
 item from measurement, not deduction.
 
-## Nine bugs that only showed up in game
+## Ten bugs that only showed up in game
 
 | # | symptom | the real cause |
 |---|---|---|
@@ -527,6 +534,7 @@ item from measurement, not deduction.
 | 7 | the same characters against the TOP edge of the line | my own clamping of the subtraction - a fix for bug 6 that outlived it |
 | 8 | "Windows - Application Error" on every exit: `nvoglv32+0x855FFD` referenced `0x00000010` | `DllMain(DETACH)` released our shaders at process exit; we are injected before `d3d9.dll` (DXVK) loads the Vulkan driver, the loader detaches in reverse order, and `d3d9.trackPipelineLifetime` sent the release straight into the dead driver |
 | 9 | ERROR #132, `0x80000003` BREAKPOINT at `005C9008` on zone discovery | `005C9001 jne 005C9007` jumps into the middle of site 3; Detours had put the tail of its `jmp` and an `int3` there (risk R4) |
+| 10 | no text at all on one machine (reported with ClassicAPI.dll loaded): `WriteGeometry: NO DEVICE`, no `device captured` | `d3d9.dll` is unloaded and loaded again before the client creates its device. At the same base the vtbl[16] guard re-swaps the fresh table and the capture works; at another base (`5EF314B0` -> `5EEF14B0`) the chain stays on the dead copy, and the guard read `83440486` out of the new image as a "foreign" CreateDevice and wrote into it. Fix: the guard checks which module owns the table, and `GetDevice` reads the client's own pointer `[00C0ED38]+0x38A8` |
 
 ## Capturing the device - three approaches failed, the fourth works
 
@@ -546,6 +554,12 @@ So we create our own throwaway device on a hidden 8x8 window, swap `EndScene`
 (slot 42) in its vtable and release our own device. From that moment on every DXVK
 device in the process - the client's included - goes through our hook and hands
 itself over in `this`.
+
+**A fifth, race-free source (2026-09-11):** the client's own pointer,
+`[00C0ED38] + 0x38A8` (see stage 4). `GetDevice` reads it on every call and, if it
+differs from what the chain caught, takes it. On a normal run the log shows
+`client device pointer: X, capture chain: X (same)`; where the chain missed it shows
+`device read from the client`. `client_device=0` turns it off.
 
 **`commit = 0` does NOT mean "the hook works".** It means only that Detours
 reported no error. For three rounds zero was read as success; what settled it was a

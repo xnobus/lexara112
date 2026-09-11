@@ -58,3 +58,9 @@ site_texnullfill=1
 # Enable it for diagnostics only. Side effect of enabling it: the CTRL+ALT+F
 # shortcut comes back (its handler lives in the EndScene hook installed this way).
 #shared_vtable=1
+
+# The device straight from the client's own pointer ([00C0ED38] + 0x38A8), used
+# when the CreateDevice capture misses it - e.g. d3d9.dll unloaded and loaded
+# again at another base, which left a user with NO TEXT AT ALL.
+# 0 = only the CreateDevice capture, as before.
+client_device=1

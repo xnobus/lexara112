@@ -79,7 +79,7 @@ the full diff of the port lives in the git history.
 Every substantive change (not a mere address) carries a `[1.12]` comment in the
 code.
 
-## Nine bugs that only showed up in game
+## Ten bugs that only showed up in game
 
 | symptom | the real cause |
 |---|---|
@@ -92,6 +92,7 @@ code.
 | the same characters against the top edge | a fix for the previous bug that outlived it |
 | "Windows - Application Error" on every exit, `nvoglv32+0x855FFD` reading `0x10` | `DllMain(DETACH)` released our shaders at process exit - we are loaded before DXVK and the Vulkan driver, so the loader had already torn both down |
 | ERROR #132, BREAKPOINT at `005C9008` on discovering a zone | `005C9001 jne 005C9007` jumps into the middle of the CheckGeometry site, onto the tail of Detours' `jmp` and its `int3` padding. The same jump exists in 3.3.5, so upstream Lexara has it too |
+| no text at all (reported with ClassicAPI.dll loaded) - `WriteGeometry: NO DEVICE` | `d3d9.dll` was unloaded and loaded again at another base; the capture chain stayed on the dead copy and the client created its device through the new one. The glyphs were already rewritten for our atlas, but nothing ever bound our shaders. Now the device is read from the client's own pointer (`client_device`) |
 
 ## Pitfalls worth remembering beyond this project
 
