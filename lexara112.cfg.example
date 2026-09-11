@@ -30,6 +30,12 @@ ft_hooks=1
 
 # --- compiling and binding our own shaders ---
 shaders=1
+# Our shaders and the WorldViewProj matrix set again inside the draw call, after
+# the client has pushed its own lazily cached state to the device (it drops our
+# pixel shader after the 3D world). 0 = no damage numbers over mobs.
+sync_at_draw=1
+# Diagnostics: log the damage text batch (strings, vertices, device state).
+#diag_damage=1
 
 # The MSDF renderer: 1 = enabled, 0 = the client draws text its own way.
 # CTRL+ALT+F11 toggles it in game as well - the write takes effect on the next launch.

@@ -79,6 +79,37 @@ namespace {
     // them the log grows with every frame and becomes a performance problem itself.
     bool g_logBind = false, g_logWrite = false, g_logFont = false;
 
+    // [1.12] Raised between BindMsdfShaders and UnbindMsdfShaders, so the draw
+    // hook can tell which draws are ours.
+    bool g_msdfBound = false;
+
+    // [1.12] DIAGNOSTIC, opt-in (diag_damage=1): the damage numbers over mobs.
+    // Raised while the client renders the damage text batch (00CE8800, created
+    // at 006C8470 from DAMAGE_TEXT_FONT, rendered from 006C8820).
+    bool g_diagDamageOn = false;
+    bool g_inDamageBatch = false;
+    int g_diagDamageGeom = 0, g_diagDamageSkip = 0, g_diagDamageWrite = 0, g_diagDamageDraw = 0;
+    constexpr uintptr_t DAMAGE_TEXT_BATCH = 0x00CE8800;
+
+    void DiagDamageString(const char* where, CGxString* s) {
+        CGxFontGeomBatch* b = s->m_geomBuffers[0];
+        Log("[MSDF] damage %s: str=%p '%.24s' flags=%08X size=%.5f mult=%.5f col=%08X shadow=%08X (%.4f,%.4f)"
+            " finalPos=(%.1f,%.1f,%.1f) face=%p handle=%p verts=%u",
+            where, s, s->m_text ? s->m_text : "", s->m_flags, s->m_fontSize, s->m_fontSizeMult,
+            s->m_textColor, s->m_shadowColor, s->m_shadowOffset.x, s->m_shadowOffset.y,
+            s->m_finalPos.X, s->m_finalPos.Y, s->m_finalPos.Z,
+            s->GetFontFace(), MSDFFont::Get(s->GetFontFace()), b ? b->m_verts.m_count : 0u);
+    }
+
+    void DiagDamageQuad(const char* tag, CGxString* s) {
+        CGxFontGeomBatch* b = s->m_geomBuffers[0];
+        if (!b || !b->m_verts.m_data || b->m_verts.m_count < 4) return;
+        const CGxFontVertex* v = b->m_verts.m_data;
+        Log("       %s: (%.2f,%.2f,%.3f uv %.4f,%.4f) (%.2f,%.2f uv %.4f,%.4f) (%.2f,%.2f uv %.4f,%.4f) (%.2f,%.2f uv %.4f,%.4f)",
+            tag, v[0].pos.X, v[0].pos.Y, v[0].pos.Z, v[0].u, v[0].v, v[1].pos.X, v[1].pos.Y, v[1].u, v[1].v,
+            v[2].pos.X, v[2].pos.Y, v[2].u, v[2].v, v[3].pos.X, v[3].pos.Y, v[3].u, v[3].v);
+    }
+
     // [1.12] Ten patch sites. Addresses from stage 1 (lexara-port-map.md); the
     // 3.3.5 counterpart is in the trailing comment. In 1.12 each site has at least
     // as many bytes as the detour needs. Only site 3 (CheckGeometry_site) had its
@@ -139,7 +170,17 @@ namespace {
     }
 
     void __fastcall ProcessGeometry(CGxString* pThis) {
+        if (g_inDamageBatch && !(pThis->m_flags & 0x40000000) && g_diagDamageSkip < 3) {
+            ++g_diagDamageSkip;
+            DiagDamageString("ProcessGeometry SKIPPED (no 0x40000000)", pThis);
+        }
         if (!(pThis->m_flags & 0x40000000)) return;
+        const bool diag = g_inDamageBatch && g_diagDamageGeom < 12;
+        if (diag) {
+            ++g_diagDamageGeom;
+            DiagDamageString("ProcessGeometry", pThis);
+            DiagDamageQuad("before", pThis);
+        }
         if (!MSDF::ENABLED) return;
 
         // [1.12] Without a device an atlas page cannot be created
@@ -216,6 +257,11 @@ namespace {
                 vert3->u = u1 * uSign; vert3->v = v1 * vSign;
             }
         }
+        if (diag) {
+            DiagDamageQuad("after ", pThis);
+            Log("       is3d=%d scale=%.5f pad=%.3f fontOffs=%.2f atlasFlags=%08X",
+                is3d ? 1 : 0, scale, pad, fontOffs, flags);
+        }
         pThis->m_flags &= ~0x40000000;
 
         uint32_t versionToken = (fontHandle->GetAtlasEvictionCount() & 0x7F) | 0x80;
@@ -245,6 +291,19 @@ namespace {
         pThis->WriteGeometry(destPtr, index, vertIndex, vertCount);
 
         MSDFFont* fontHandle = MSDFFont::Get(pThis->GetFontFace());
+
+        if (g_inDamageBatch && g_diagDamageWrite < 10) {
+            ++g_diagDamageWrite;
+            DiagDamageString("WriteGeometry", pThis);
+            Log("       dest=%08X index=%d vertIndex=%d vertCount=%d bound=%d", destPtr, index, vertIndex, vertCount, g_msdfBound ? 1 : 0);
+            // The client's font vertex: float3 position, D3DCOLOR, float2 uv - 24 bytes.
+            const uint8_t* d = reinterpret_cast<const uint8_t*>(destPtr);
+            for (int i = 0; d && i < vertCount && i < 8; ++i) {
+                const float* f = reinterpret_cast<const float*>(d + i * 24);
+                const uint32_t col = *reinterpret_cast<const uint32_t*>(d + i * 24 + 12);
+                Log("       out v%d (%.2f, %.2f, %.3f) col=%08X uv=(%.5f, %.5f)", i, f[0], f[1], f[2], col, f[4], f[5]);
+            }
+        }
 
         // [1.12] A discriminating probe: RenderGlyph DOES recognise the font (it
         // shows in the vertical offset) while WriteGeometry does not. The only
@@ -404,6 +463,27 @@ namespace {
         }
     }
 
+    void ComputeWvp(IDirect3DDevice9* device, float (&c)[16]) {
+        D3DMATRIX world{}, view{}, proj{}, wv{}, wvp{};
+        device->GetTransform(D3DTS_WORLD, &world);
+        device->GetTransform(D3DTS_VIEW, &view);
+        device->GetTransform(D3DTS_PROJECTION, &proj);
+        MulMat4(&world.m[0][0], &view.m[0][0], &wv.m[0][0]);
+        MulMat4(&wv.m[0][0], &proj.m[0][0], &wvp.m[0][0]);
+
+        if (MSDF_WVP_TRANSPOSE) {
+            for (int r = 0; r < 4; ++r)
+                for (int col = 0; col < 4; ++col)
+                    c[r * 4 + col] = wvp.m[col][r];
+        } else {
+            memcpy(c, &wvp.m[0][0], sizeof(c));
+        }
+    }
+
+    // The WVP last written to c240..c243, so the draw hook can skip the upload
+    // when nothing changed.
+    float s_uploadedWvp[16] = {};
+
     void BindMsdfShaders(IDirect3DDevice9* device) {
         EnsureShaders(device);
         if (!device || !s_cachedVS || !s_cachedPS) {
@@ -415,25 +495,16 @@ namespace {
             return;
         }
 
-        D3DMATRIX world{}, view{}, proj{}, wv{}, wvp{};
-        device->GetTransform(D3DTS_WORLD, &world);
-        device->GetTransform(D3DTS_VIEW, &view);
-        device->GetTransform(D3DTS_PROJECTION, &proj);
-        MulMat4(&world.m[0][0], &view.m[0][0], &wv.m[0][0]);
-        MulMat4(&wv.m[0][0], &proj.m[0][0], &wvp.m[0][0]);
-
+        // Only a first guess - SyncStateAtDraw replaces it right before the draw,
+        // once the client has pushed its WORLD matrix to the device.
         float c[16];
-        if (MSDF_WVP_TRANSPOSE) {
-            for (int r = 0; r < 4; ++r)
-                for (int col = 0; col < 4; ++col)
-                    c[r * 4 + col] = wvp.m[col][r];
-        } else {
-            memcpy(c, &wvp.m[0][0], sizeof(c));
-        }
+        ComputeWvp(device, c);
 
         device->SetVertexShader(s_cachedVS);
         device->SetPixelShader(s_cachedPS);
+        g_msdfBound = true;
         const HRESULT hrWvp = device->SetVertexShaderConstantF(MSDF::SDF_WVP_REG, c, 4);
+        memcpy(s_uploadedWvp, c, sizeof(c));
 
         if (!g_logBind) {
             g_logBind = true;
@@ -463,10 +534,135 @@ namespace {
         if (!device) return;
         device->SetVertexShader(nullptr);
         device->SetPixelShader(nullptr);
+        g_msdfBound = false;
+    }
+
+    // [1.12] Between BindMsdfShaders (in WriteGeometry) and the draw itself the
+    // client runs IStateSync (005A1B20), which pushes its own lazily cached state
+    // to the device. Two parts of it collide with us:
+    //
+    //  - Shaders. This client does use shaders in the 3D world, and it sets them
+    //    through 005A0570 (pixel) / 005A05D0 (vertex) only when its cached state
+    //    changes. After the world pass its cache holds a pixel shader, so the
+    //    first draw that wants none - the damage numbers (DAMAGE_TEXT_FONT, batch
+    //    00CE8800, drawn from 006C8820 straight after the world) - gets
+    //    SetPixelShader(NULL) right on top of ours. Measured in game with
+    //    diag_damage=1: vs = ours, ps = 00000000 at the draw. vs_3_0 with no pixel
+    //    shader is not a valid pairing, so the damage numbers were not drawn at all,
+    //    or came out as a flat rectangle. Interface text never saw this, because
+    //    by then the client's cache is already empty and nothing gets set.
+    //
+    //  - WORLD. VIEW and PROJECTION go to the device as soon as they are set
+    //    (005A1450, 005A11D0), but WORLD only lazily: IXformSync (005A1E70) sets
+    //    it here, if it is dirty (+0x1894). A GetTransform at bind time can then
+    //    return the WORLD of the last model. Reproduced on the login screen by
+    //    forcing that state; not seen in game so far, but the matrices are taken
+    //    here anyway, where they are exactly what the fixed pipeline would use.
+    int g_wvpLateCount = 0, g_shaderLostCount = 0;
+
+    void SyncStateAtDraw(IDirect3DDevice9* device) {
+        if (!g_msdfBound || !device) return;
+
+        static bool logged = false;
+        if (!logged) { logged = true; Log("[MSDF] sync_at_draw: first font draw reached the draw hook"); }
+
+        IDirect3DVertexShader9* vs = nullptr;
+        IDirect3DPixelShader9* ps = nullptr;
+        device->GetVertexShader(&vs);
+        device->GetPixelShader(&ps);
+        if (vs != s_cachedVS || ps != s_cachedPS) {
+            if (g_shaderLostCount < 3) {
+                ++g_shaderLostCount;
+                Log("[MSDF] our shaders were replaced before the draw (#%d): vs=%p ps=%p (ours %p %p) - setting them again",
+                    g_shaderLostCount, vs, ps, s_cachedVS, s_cachedPS);
+            }
+            device->SetVertexShader(s_cachedVS);
+            device->SetPixelShader(s_cachedPS);
+        }
+        if (vs) vs->Release();
+        if (ps) ps->Release();
+
+        float c[16];
+        ComputeWvp(device, c);
+        if (memcmp(c, s_uploadedWvp, sizeof(c)) == 0) return;
+
+        if (g_wvpLateCount < 3) {
+            ++g_wvpLateCount;
+            Log("[MSDF] WVP changed between bind and draw (#%d) - the client synced WORLD late:",
+                g_wvpLateCount);
+            Log("       bind: %9.5f %9.5f %9.5f %9.5f | %9.5f %9.5f %9.5f %9.5f",
+                s_uploadedWvp[0], s_uploadedWvp[1], s_uploadedWvp[2], s_uploadedWvp[3],
+                s_uploadedWvp[4], s_uploadedWvp[5], s_uploadedWvp[6], s_uploadedWvp[7]);
+            Log("       draw: %9.5f %9.5f %9.5f %9.5f | %9.5f %9.5f %9.5f %9.5f",
+                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+        }
+
+        device->SetVertexShaderConstantF(MSDF::SDF_WVP_REG, c, 4);
+        memcpy(s_uploadedWvp, c, sizeof(c));
+    }
+
+    // [1.12] DIAGNOSTIC (diag_damage=1): the device state for the first draws of
+    // the damage text batch.
+    void DiagDamageDraw(IDirect3DDevice9* d, D3DPRIMITIVETYPE type, INT base, UINT minV, UINT numV, UINT start, UINT prim) {
+        if (!g_inDamageBatch || g_diagDamageDraw >= 6) return;
+        ++g_diagDamageDraw;
+
+        IDirect3DVertexShader9* vs = nullptr; IDirect3DPixelShader9* ps = nullptr;
+        d->GetVertexShader(&vs); d->GetPixelShader(&ps);
+        DWORD fvf = 0; d->GetFVF(&fvf);
+        IDirect3DVertexBuffer9* vb = nullptr; UINT off = 0, stride = 0;
+        d->GetStreamSource(0, &vb, &off, &stride);
+        IDirect3DBaseTexture9* t0 = nullptr; IDirect3DBaseTexture9* t12 = nullptr;
+        d->GetTexture(0, &t0); d->GetTexture(12, &t12);
+        D3DVIEWPORT9 vp{}; d->GetViewport(&vp);
+        RECT sc{}; d->GetScissorRect(&sc);
+        float wvp[16] = {}, ctlV[4] = {}, ctlP[4] = {};
+        d->GetVertexShaderConstantF(MSDF::SDF_WVP_REG, wvp, 4);
+        d->GetVertexShaderConstantF(MSDF::SDF_CONTROL_REG, ctlV, 1);
+        d->GetPixelShaderConstantF(MSDF::SDF_CONTROL_REG, ctlP, 1);
+
+        Log("[MSDF] damage draw #%d: type=%d base=%d minV=%u numV=%u start=%u prim=%u bound=%d",
+            g_diagDamageDraw, (int)type, base, minV, numV, start, prim, g_msdfBound ? 1 : 0);
+        Log("       vs=%p (ours %p) ps=%p (ours %p) fvf=0x%lX vb=%p off=%u stride=%u tex0=%p tex12=%p",
+            vs, s_cachedVS, ps, s_cachedPS, fvf, vb, off, stride, t0, t12);
+        Log("       viewport=%lu,%lu %lux%lu z=%.2f..%.2f scissor=%ld,%ld,%ld,%ld",
+            vp.X, vp.Y, vp.Width, vp.Height, vp.MinZ, vp.MaxZ, sc.left, sc.top, sc.right, sc.bottom);
+        Log("       c%u WVP: %.6f %.6f %.6f %.6f | %.6f %.6f %.6f %.6f | %.6f %.6f %.6f %.6f | %.6f %.6f %.6f %.6f",
+            MSDF::SDF_WVP_REG, wvp[0], wvp[1], wvp[2], wvp[3], wvp[4], wvp[5], wvp[6], wvp[7],
+            wvp[8], wvp[9], wvp[10], wvp[11], wvp[12], wvp[13], wvp[14], wvp[15]);
+        Log("       c%u control vs=(%.2f %.2f %.2f %.2f) ps=(%.2f %.2f %.2f %.2f)",
+            MSDF::SDF_CONTROL_REG, ctlV[0], ctlV[1], ctlV[2], ctlV[3], ctlP[0], ctlP[1], ctlP[2], ctlP[3]);
+
+        static const struct { D3DRENDERSTATETYPE rs; const char* name; } kStates[] = {
+            { D3DRS_ZENABLE, "ZENABLE" }, { D3DRS_ZFUNC, "ZFUNC" }, { D3DRS_ZWRITEENABLE, "ZWRITE" },
+            { D3DRS_FILLMODE, "FILL" }, { D3DRS_CULLMODE, "CULL" },
+            { D3DRS_ALPHABLENDENABLE, "BLEND" }, { D3DRS_SRCBLEND, "SRC" }, { D3DRS_DESTBLEND, "DST" },
+            { D3DRS_BLENDOP, "BLENDOP" }, { D3DRS_SEPARATEALPHABLENDENABLE, "SEPALPHA" },
+            { D3DRS_ALPHATESTENABLE, "ATEST" }, { D3DRS_ALPHAFUNC, "AFUNC" }, { D3DRS_ALPHAREF, "AREF" },
+            { D3DRS_COLORWRITEENABLE, "CWRITE" }, { D3DRS_STENCILENABLE, "STENCIL" },
+            { D3DRS_SCISSORTESTENABLE, "SCISSOR" }, { D3DRS_CLIPPING, "CLIPPING" },
+            { D3DRS_CLIPPLANEENABLE, "CLIPPLANES" }, { D3DRS_FOGENABLE, "FOG" },
+            { D3DRS_SRGBWRITEENABLE, "SRGBW" }, { D3DRS_LIGHTING, "LIGHTING" },
+        };
+        char line[768]; int len = 0;
+        for (const auto& st : kStates) {
+            DWORD v = 0; d->GetRenderState(st.rs, &v);
+            len += _snprintf_s(line + len, sizeof(line) - len, _TRUNCATE, "%s=%lX ", st.name, v);
+        }
+        Log("       rs: %s", line);
+
+        if (vs) vs->Release();
+        if (ps) ps->Release();
+        if (vb) vb->Release();
+        if (t0) t0->Release();
+        if (t12) t12->Release();
     }
 
     void __fastcall CGxuFontRenderBatchHk(CGxuFont* pThis) {
+        g_inDamageBatch = g_diagDamageOn
+            && reinterpret_cast<uintptr_t>(pThis) == *reinterpret_cast<const uintptr_t*>(DAMAGE_TEXT_BATCH);
         pThis->RenderBatch();
+        g_inDamageBatch = false;
         if (IDirect3DDevice9* device = D3D::GetDevice()) {
             constexpr float resetControl[4] = { 0, 0, 0, 0 };
             device->SetPixelShaderConstantF(MSDF::SDF_CONTROL_REG, resetControl, 1);
@@ -917,6 +1113,22 @@ void MSDF::initialize() {
             " the whole MSDF renderer is disabled");
         s_msdfInitHookArmed = true;
         return;
+    }
+
+    // Registered here, before the device exists: InstallDeviceHooks only
+    // detours the draw calls if someone is already listening.
+    if (CfgOn("sync_at_draw")) {
+        D3D::RegisterDrawIndexedPrimitiveCallback(
+            [](IDirect3DDevice9* d, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT) { SyncStateAtDraw(d); });
+        D3D::RegisterDrawPrimitiveCallback(
+            [](IDirect3DDevice9* d, D3DPRIMITIVETYPE, UINT, UINT) { SyncStateAtDraw(d); });
+    }
+
+    // After sync_at_draw, so the dump shows the state the draw really gets.
+    if (MSDF::CfgFlagOptIn("diag_damage")) {
+        g_diagDamageOn = true;
+        D3D::RegisterDrawIndexedPrimitiveCallback(DiagDamageDraw);
+        Log("[MSDF] diag_damage=1: logging the damage text batch (00CE8800)");
     }
 
     Hooks::Detour(&FreeType::InitFn, FreeType_InitHk);

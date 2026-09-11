@@ -265,8 +265,15 @@ namespace D3D {
             if (g_isProcessTerminating || !device) return;
             g_device = device;
             Log("[MSDF] device captured: %p", device);
+            // The vtable functions are code inside d3d9.dll, shared by every
+            // device the process creates. A second capture (the client recreates
+            // the device on a graphics restart) must not detour them again: the
+            // entry now starts with our jump, Detours would follow it and hook
+            // our own hook, and the trampoline would call back into itself.
+            static bool s_vtblHooked = false;
             {
-                {
+                if (!s_vtblHooked) {
+                    s_vtblHooked = true;
                     __try {
                         if (IDirect3DDevice9Vtbl* vtbl = *reinterpret_cast<IDirect3DDevice9Vtbl**>(device)) {
                             DetourTransactionBegin();
@@ -328,9 +335,9 @@ namespace D3D {
                         }
                     }
                     __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-                    for (auto& callback : g_onCreateCallbacks) callback();
                 }
+
+                for (auto& callback : g_onCreateCallbacks) callback();
             }
         }
 
