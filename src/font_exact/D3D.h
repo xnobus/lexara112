@@ -7,7 +7,7 @@
 
 namespace D3D {
     void initialize();
-    void shutdown();   // [1.12] fires onDestroy; woalne z DllMain(DETACH)
+    void shutdown();   // [1.12] fires onDestroy; called from DllMain(DETACH), never at process exit
 
     IDirect3DDevice9* GetDevice();
 

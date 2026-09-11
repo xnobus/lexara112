@@ -79,7 +79,7 @@ the full diff of the port lives in the git history.
 Every substantive change (not a mere address) carries a `[1.12]` comment in the
 code.
 
-## Seven bugs that only showed up in game
+## Eight bugs that only showed up in game
 
 | symptom | the real cause |
 |---|---|
@@ -90,6 +90,7 @@ code.
 | letters disappearing | a failed upload reported "success", the entry kept `UV (0,0)` permanently |
 | `.` `-` `_` with `y ~ 1.8e7` | the `GetGlyphYMetrics` stub clobbered EDX, which is live in 1.12 |
 | the same characters against the top edge | a fix for the previous bug that outlived it |
+| "Windows - Application Error" on every exit, `nvoglv32+0x855FFD` reading `0x10` | `DllMain(DETACH)` released our shaders at process exit - we are loaded before DXVK and the Vulkan driver, so the loader had already torn both down |
 
 ## Pitfalls worth remembering beyond this project
 

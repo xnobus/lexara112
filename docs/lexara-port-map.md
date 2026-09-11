@@ -504,7 +504,7 @@ the UI not painted with the font shader; (4) texture memory against
 letters sit where they should. Below is what had to be fixed along the way - every
 item from measurement, not deduction.
 
-## Seven bugs that only showed up in game
+## Eight bugs that only showed up in game
 
 | # | symptom | the real cause |
 |---|---|---|
@@ -515,6 +515,7 @@ item from measurement, not deduction.
 | 5 | letters disappearing despite a correct atlas | a failed upload reported "success", the entry kept `UV (0,0)-(0,0)` permanently |
 | 6 | `.`, `-`, `_` with `y ~ 1.8e7` | the `GetGlyphYMetrics` stub clobbered EDX, which is live in 1.12 |
 | 7 | the same characters against the TOP edge of the line | my own clamping of the subtraction - a fix for bug 6 that outlived it |
+| 8 | "Windows - Application Error" on every exit: `nvoglv32+0x855FFD` referenced `0x00000010` | `DllMain(DETACH)` released our shaders at process exit; we are injected before `d3d9.dll` (DXVK) loads the Vulkan driver, the loader detaches in reverse order, and `d3d9.trackPipelineLifetime` sent the release straight into the dead driver |
 
 ## Capturing the device - three approaches failed, the fourth works
 

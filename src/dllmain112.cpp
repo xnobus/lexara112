@@ -43,7 +43,7 @@ bool FontExact_OnAttach();
 
 HMODULE g_hThisModule = nullptr;
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason, LPVOID)
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason, LPVOID lpReserved)
 {
     switch (ul_reason)
     {
@@ -55,7 +55,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason, LPVOID)
 
     case DLL_PROCESS_DETACH:
         g_isProcessTerminating = true;
-        D3D::shutdown();
+        // [1.12] lpReserved != NULL means the process is exiting, not a FreeLibrary.
+        // VanillaFixes injects us BEFORE the client loads d3d9.dll (DXVK), which in
+        // turn loads the Vulkan driver (nvoglv32.dll), and the loader detaches in
+        // reverse order - by the time we get here both are already torn down.
+        // Releasing our shaders then walks DXVK -> vkDestroyPipeline
+        // (d3d9.trackPipelineLifetime) into the dead driver: "The instruction at
+        // nvoglv32+0x855FFD referenced memory at 0x00000010" on EVERY exit.
+        // The OS reclaims the D3D objects with the process; ~AtlasPage already
+        // skips its texture for the same reason.
+        if (!lpReserved) D3D::shutdown();
         MSDF::shutdown();
         break;
     }
