@@ -2,8 +2,10 @@
 
 A port of the MSDF-atlas font renderer from the 3.3.5a client to the 1.12 client.
 
-Original: [Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5)
+Original: [Stormhand-dev/Lexara-HD-Font-Renderer-for-WoW-3.3.5](https://github.com/Stormhand-dev/Lexara---HD-Font-Renderer-for-WoW-3.3.5)
 Licence: GPL-3.0 (same as the original) - see [LICENSE](LICENSE).
+
+Made by Nobus & Aethus (Zuzia)
 
 ## Screenshots
 
