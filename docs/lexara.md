@@ -79,7 +79,7 @@ the full diff of the port lives in the git history.
 Every substantive change (not a mere address) carries a `[1.12]` comment in the
 code.
 
-## Eight bugs that only showed up in game
+## Nine bugs that only showed up in game
 
 | symptom | the real cause |
 |---|---|
@@ -91,6 +91,7 @@ code.
 | `.` `-` `_` with `y ~ 1.8e7` | the `GetGlyphYMetrics` stub clobbered EDX, which is live in 1.12 |
 | the same characters against the top edge | a fix for the previous bug that outlived it |
 | "Windows - Application Error" on every exit, `nvoglv32+0x855FFD` reading `0x10` | `DllMain(DETACH)` released our shaders at process exit - we are loaded before DXVK and the Vulkan driver, so the loader had already torn both down |
+| ERROR #132, BREAKPOINT at `005C9008` on discovering a zone | `005C9001 jne 005C9007` jumps into the middle of the CheckGeometry site, onto the tail of Detours' `jmp` and its `int3` padding. The same jump exists in 3.3.5, so upstream Lexara has it too |
 
 ## Pitfalls worth remembering beyond this project
 
@@ -102,6 +103,11 @@ code.
   (`mov edx,[ecx+0x54]` / `mov ecx,[edx+0x68]`), 1.12 through ECX
   (`mov ecx,[ecx+0x54]` / `mov ecx,[ecx+0x68]`). A literal port clobbered a live,
   deliberately zeroed EDX. The length check passed all the same.
+- **A site is safe only if no branch targets its INTERIOR.** Detours overwrites
+  whole instructions and pads the remainder with `int3`; a jump into those bytes
+  crashes only on the rare path that takes it (here: a string with no geometry).
+  Scan every branch in the binary against every site, not just the site's own
+  length.
 - **Two overlapping bugs.** The symptom of someone else's bug was treated; the fix
   did not help, but it STAYED in the code, and once the real cause was fixed the
   fix itself became a bug. Measure after each single change, and back out old

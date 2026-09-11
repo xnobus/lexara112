@@ -81,11 +81,12 @@ namespace {
 
     // [1.12] Ten patch sites. Addresses from stage 1 (lexara-port-map.md); the
     // 3.3.5 counterpart is in the trailing comment. In 1.12 each site has at least
-    // as many bytes as the detour needs, so none required moving the boundary.
+    // as many bytes as the detour needs. Only site 3 (CheckGeometry_site) had its
+    // start moved, because of a jump into its middle - see its stub.
     auto(*CGxString__CheckGeometry_call)() = reinterpret_cast<void(*)()>(0x005C9019);          // 006C4B09
     constexpr uintptr_t CGxString__CheckGeometry_call_jmpback = 0x005C9020;                    // 006C4B10
 
-    auto(*CGxString__CheckGeometry_site)() = reinterpret_cast<void(*)()>(0x005C9003);          // 006C4AF3
+    auto(*CGxString__CheckGeometry_site)() = reinterpret_cast<void(*)()>(0x005C9001);          // 006C4AF3 (moved from 005C9003)
     constexpr uintptr_t CGxString__CheckGeometry_site_loopstart = 0x005C9010;                  // 006C4B00
 
     auto(*CGxString__GetGlyphYMetrics_site)() = reinterpret_cast<void(*)()>(0x005D137A);       // 006C8C71
@@ -537,8 +538,29 @@ namespace {
         return result;
     }
 
+    // [1.12] The site starts at 005C9001, on the `jne`, not at 005C9003 as in
+    // Lexara (006C4AF3). The original code:
+    //   005C8FFD  test bl,1
+    //   005C9000  push edi
+    //   005C9001  jne  005C9007       <- taken when [esi+24h] is odd (empty list)
+    //   005C9003  test ebx,ebx
+    //   005C9005  jne  005C9010
+    //   005C9007  xor  ebx,ebx
+    //   005C9009  lea  esp,[esp+0]
+    //   005C9010  (loop)
+    // A detour at 005C9003 writes `jmp` over 005C9003..005C9007 and int3 at
+    // 005C9008, so that `jne` landed on the last byte of the jump displacement
+    // (0x55, push ebp) and then on the int3: ERROR #132, BREAKPOINT at 005C9008.
+    // It fires for a string whose geometry list is empty (the odd head is the
+    // list's own terminator) - seen on the zone-discovery text. 3.3.5 has the
+    // same jump (006C4AF1 jne 006C4AF7), so upstream Lexara carries it too.
+    // With the `jne` inside the patch, the stub takes that branch itself.
     __declspec(naked) void CGxString__CheckGeometry_siteHk() {
         __asm {
+            test bl, 1;             // the overwritten `jne 005C9007`:
+            jz list_head_ok;        // an odd head means an empty list,
+            xor ebx, ebx;           // which the client turns into ebx = 0
+        list_head_ok:
             pushad;
             mov edi, ebx;
 

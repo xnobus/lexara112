@@ -38,7 +38,7 @@ functions with int3, so looking for the padding gives nothing but junk there).
 |---|---|---|---|---|---|
 | 1 | InitFontIndexBuffer_site | 006C47BD -> 006C47D8 | 005C92F7 -> 005C930F | 27 / 24 | fits |
 | 2 | AllocateFontIndexBuffer_site | 006C480C -> 006C4811 | 005C933F -> 005C9344 | 5 / 5 | fits, `mov edi,3FFFh` |
-| 3 | CheckGeometry_site | 006C4AF3 -> 006C4B00 | 005C9003 -> 005C9010 | 13 / 13 | byte for byte |
+| 3 | CheckGeometry_site | 006C4AF3 -> 006C4B00 | **005C9001** -> 005C9010 | 13 / 15 | start moved from 005C9003, see risk R4 |
 | 4 | CheckGeometry_call | 006C4B09 -> 006C4B10 | 005C9019 -> 005C9020 | 7 / 7 | byte for byte |
 | 5 | BufStream_site | 006C4B40 -> 006C4B45 | 005C904A -> 005C904F | 5 / 5 | fits |
 | 6 | bufalloc_1_site | 006C4B64 -> 006C4B70 | 005C9067 -> 005C9073 | 12 / 12 | fits, 0xB4 -> 0xA0 |
@@ -83,6 +83,16 @@ functions with int3, so looking for the padding gives nothing but junk there).
 - **R3.** InitializeTextLine was not found in 1.12. The hook is optional
   (pre-loading characters into the atlas), so its absence blocks performance, not
   correctness.
+- **R4 (found in game, 2026-09-11).** Site 3 as mapped (`005C9003`) is the target
+  of `005C9001 jne 005C9007`, taken when the string's geometry list is empty (the
+  head `[esi+0x24]` is odd - the list's own terminator). Detours puts `jmp` over
+  `005C9003..005C9007` and `int3` at `005C9008`, so the branch executed the last
+  displacement byte (`0x55`, `push ebp`) and then the `int3`: ERROR #132,
+  BREAKPOINT at `005C9008`, seen when discovering a new zone. The site now starts
+  at the `jne` itself and the stub reproduces that branch. 3.3.5 has the same jump
+  (`006C4AF1 jne 006C4AF7`), so upstream Lexara carries the same mine. A sweep of
+  every branch in `WoW.exe` against all ten sites found no other live target
+  inside a patch besides R1.
 
 ## Conclusion of stage 1
 
@@ -504,7 +514,7 @@ the UI not painted with the font shader; (4) texture memory against
 letters sit where they should. Below is what had to be fixed along the way - every
 item from measurement, not deduction.
 
-## Eight bugs that only showed up in game
+## Nine bugs that only showed up in game
 
 | # | symptom | the real cause |
 |---|---|---|
@@ -516,6 +526,7 @@ item from measurement, not deduction.
 | 6 | `.`, `-`, `_` with `y ~ 1.8e7` | the `GetGlyphYMetrics` stub clobbered EDX, which is live in 1.12 |
 | 7 | the same characters against the TOP edge of the line | my own clamping of the subtraction - a fix for bug 6 that outlived it |
 | 8 | "Windows - Application Error" on every exit: `nvoglv32+0x855FFD` referenced `0x00000010` | `DllMain(DETACH)` released our shaders at process exit; we are injected before `d3d9.dll` (DXVK) loads the Vulkan driver, the loader detaches in reverse order, and `d3d9.trackPipelineLifetime` sent the release straight into the dead driver |
+| 9 | ERROR #132, `0x80000003` BREAKPOINT at `005C9008` on zone discovery | `005C9001 jne 005C9007` jumps into the middle of site 3; Detours had put the tail of its `jmp` and an `int3` there (risk R4) |
 
 ## Capturing the device - three approaches failed, the fourth works
 

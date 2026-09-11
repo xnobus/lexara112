@@ -77,7 +77,7 @@ it):
 
 - [`docs/lexara.md`](docs/lexara.md) - everything worth knowing: status, usage,
   **how this port differs from the original**, the list of modified Lexara files,
-  pitfalls, the eight bugs that only showed up in game.
+  pitfalls, the nine bugs that only showed up in game.
 - [`docs/lexara-port-map.md`](docs/lexara-port-map.md) - **1.12 addresses,
   structure layouts, calling conventions, the course of stages 1-5.** Start here
   for any work on hooking the client.
