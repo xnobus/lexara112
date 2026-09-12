@@ -103,6 +103,21 @@ void MSDFFont::ForgetFontEntries(MSDFFont* font) {
     for (auto& page : s_atlasPages) {
         if (!page) continue;
         std::erase_if(page->entries, [font](const auto& e) { return e.first == font; });
+        // [1.12] Sweeping the entries out was not enough: the shelf cursor
+        // (nextX/nextY/rowHeight) stayed where the dead typeface had left it, so the
+        // space was gone for the rest of the session. The client recreates its
+        // FT_Faces while it runs - issue #2's log shows the same face addresses
+        // coming back with different file sizes, and 16 `font registered` lines in a
+        // burst - and every such cycle re-uploaded the same glyphs into FRESH cells.
+        // That is what kept driving the atlas into eviction every few seconds.
+        //
+        // An empty `entries` means nothing alive points into this page: every
+        // successful upload records itself there, and eviction clears entries and
+        // cursor together. So the cursor can be rewound and the page reused, with no
+        // eviction, no full-page clear and no geometry rebuild. Stale pixels below
+        // the cursor are overwritten by whatever is laid out next - exactly as they
+        // are on a freshly created page, which is not cleared either.
+        if (page->entries.empty()) page->Clear();
     }
 }
 
@@ -115,6 +130,7 @@ int MSDFFont::EvictOldestPage() {
     if (s_oldestPage >= s_atlasPages.size()) s_oldestPage = 0;
 
     AtlasPage* page = s_atlasPages[s_oldestPage].get();
+    const size_t dropped = page->entries.size();
     for (const auto& [owner, cp] : page->entries) {
         if (owner) {
             owner->InvalidateGlyph(cp);
@@ -132,6 +148,17 @@ int MSDFFont::EvictOldestPage() {
     }
 
     ++s_evictionCount;
+    // [1.12] docs/shared-atlas.md tells the reader to watch for evictions
+    // multiplying in the log - and nothing ever wrote a line for one, which is why
+    // issue #2 arrived with a log that shows the symptom and not the cause. An
+    // eviction costs a full-page clear plus a geometry rebuild of EVERY string, so
+    // it is worth a line; throttled, because Log() opens the file per entry and a
+    // thrashing atlas evicts often.
+    if (s_evictionCount <= 10 || (s_evictionCount % 100) == 0) {
+        Log("[MSDF] atlas eviction #%u: page %u cleared (%u glyphs dropped) - "
+            "every string's geometry is rebuilt",
+            s_evictionCount, (unsigned)s_oldestPage, (unsigned)dropped);
+    }
     const int cleared = s_oldestPage;
     s_oldestPage = static_cast<uint16_t>((s_oldestPage + 1) % s_atlasPages.size());
     return cleared;
@@ -379,8 +406,28 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
         return false;
     }
 
+    // [1.12] LOCK ONLY THE GLYPH'S OWN RECTANGLE, never the whole surface.
+    //
+    // This used to be LockRect(0, &r, nullptr, 0). On a D3DPOOL_MANAGED texture a
+    // NULL rect makes the dirty region the ENTIRE subresource, and the runtime
+    // (here DXVK) then re-uploads all of it on the next draw that samples the page:
+    // 2048*2048*4 = 16 MiB PER GLYPH. A single atlas eviction invalidates roughly
+    // 410 glyphs, every one of them comes straight back through here while the
+    // strings are rebuilt, and the frame that does it moves ~6.5 GiB - the "huge
+    // stutter every 15-20s for 2-3s" of issue #2. With the rect passed in, the same
+    // upload is a padded glyph cell, on the order of 40 KiB.
+    //
+    // Pitch still describes a row of the LOCKED REGION, and pBits now points at its
+    // top-left corner, so the destination is pBits itself - the nextY/nextX offset
+    // that belonged to a full-surface lock has to go with it.
+    const RECT glyphRect = {
+        static_cast<LONG>(targetPage->nextX),
+        static_cast<LONG>(targetPage->nextY),
+        static_cast<LONG>(targetPage->nextX + metrics.width),
+        static_cast<LONG>(targetPage->nextY + metrics.height)
+    };
     D3DLOCKED_RECT lockedRect;
-    const HRESULT hrLock = targetPage->texture->LockRect(0, &lockedRect, nullptr, 0);
+    const HRESULT hrLock = targetPage->texture->LockRect(0, &lockedRect, &glyphRect, 0);
     if (FAILED(hrLock)) {
         static bool l = false; if (!l) { l = true; Log("[MSDF] upload: LockRect hr=0x%08lX (code=%u)", hrLock, codepoint); }
         return false;
@@ -392,8 +439,7 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
     }
 
     const unsigned char* src = metrics.pixelData;
-    unsigned char* dest = static_cast<unsigned char*>(lockedRect.pBits) +
-        targetPage->nextY * lockedRect.Pitch + targetPage->nextX * 4;
+    unsigned char* dest = static_cast<unsigned char*>(lockedRect.pBits);
     for (uint16_t y = 0; y < metrics.height; ++y) {
         memcpy(dest, src, metrics.width * 4);
         dest += lockedRect.Pitch;

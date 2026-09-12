@@ -201,11 +201,48 @@ struct FinalAction {
 };
 
 using FontHash = uint64_t;
+
+// [1.12] FNV-1a over a BOUNDED sample of the file instead of every byte.
+//
+// This value never leaves the process: MSDFManager::RegisterFont turns it into a
+// fontId, and that id is only the first half of the BlockKey under which a mapped
+// cache block is kept in memory. Nothing on disk carries it - the cache directory
+// is named from the family and style (MSDFCache::GetCacheBasePath) - so the shape
+// of the hash is free to change and no user's cache is invalidated.
+//
+// The full walk cost real time on the client this runs on. Every byte does a 64-bit
+// multiply, which on the 32-bit build is a three-multiply sequence, and the CJK
+// faces of the repack in issue #2 are 8-9 MiB each: about 30 ms apiece, paid again
+// for every face the client recreates - and it recreates them in bursts of sixteen
+// while the game runs.
+//
+// The sample is head, middle and tail, with the length mixed in first. Two
+// different typefaces would have to agree on their size AND on all three windows to
+// collide; for real font files, where the head alone holds the table directory with
+// its per-table offsets and checksums, that does not happen.
 inline FontHash HashFont(const FT_Byte* data, FT_Long size) {
     uint64_t h = 0xcbf29ce484222325ULL;
-    for (FT_Long i = 0; i < size; ++i) {
-        h ^= data[i];
+    const auto mix = [&h](const FT_Byte* p, FT_Long n) {
+        for (FT_Long i = 0; i < n; ++i) {
+            h ^= p[i];
+            h *= 0x100000001b3ULL;
+        }
+    };
+
+    const uint64_t len = static_cast<uint64_t>(size);
+    for (int i = 0; i < 8; ++i) {
+        h ^= static_cast<uint8_t>(len >> (i * 8));
         h *= 0x100000001b3ULL;
+    }
+    if (!data || size <= 0) return h;
+
+    constexpr FT_Long WINDOW = 64 * 1024;
+    if (size <= 3 * WINDOW) {
+        mix(data, size);
+    } else {
+        mix(data, WINDOW);
+        mix(data + (size / 2) - (WINDOW / 2), WINDOW);
+        mix(data + size - WINDOW, WINDOW);
     }
     return h;
 }
