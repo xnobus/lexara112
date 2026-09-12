@@ -176,7 +176,13 @@ struct ViewGuard {
     void* Release() { void* p = ptr; ptr = nullptr; return p; }
     void Close() {
         if (ptr) {
-            UnmapViewOfFile2(GetCurrentProcess(), ptr, MEM_PRESERVE_PLACEHOLDER);
+            // MEM_PRESERVE_PLACEHOLDER is only valid for a view that replaced a
+            // placeholder (MSDFManager's arena). The manifest views in MSDFCache
+            // come from a plain MapViewOfFile, where that flag makes the call fail
+            // and leak the view - hence the fallback.
+            if (!UnmapViewOfFile2(GetCurrentProcess(), ptr, MEM_PRESERVE_PLACEHOLDER)) {
+                UnmapViewOfFile(ptr);
+            }
             ptr = nullptr;
         }
     }
