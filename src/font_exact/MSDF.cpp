@@ -929,8 +929,11 @@ namespace {
         if (result != 0 || !aface || !*aface) return result;
 
         MSDFFont::Register(*aface, file_base, file_size);
-        Log("[MSDF] font registered: face=%p handle=%p size=%ld",
-            *aface, MSDFFont::Get(*aface), (long)file_size);
+        // Family and style are what FreeType reports (name IDs 21/16 before 1) -
+        // two files with the same pair here used to share one glyph cache.
+        Log("[MSDF] font registered: face=%p handle=%p size=%ld family='%s' style='%s'",
+            *aface, MSDFFont::Get(*aface), (long)file_size,
+            (*aface)->family_name ? (*aface)->family_name : "", (*aface)->style_name ? (*aface)->style_name : "");
         return result;
     }
 

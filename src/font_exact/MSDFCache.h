@@ -123,7 +123,7 @@ private:
     void CleanupOrphans() const;
 
     static uint32_t GetBlockId(uint32_t codepoint);
-    static std::string GetCacheBasePath(const char* familyName, const char* styleName,
+    static std::string GetCacheBasePath(const char* familyName, const char* styleName, FontHash fontHash,
         uint32_t sdfRenderSize, uint32_t sdfSpread);
     static std::string SanitizeName(std::string_view name);
 

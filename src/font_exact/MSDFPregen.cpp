@@ -89,7 +89,8 @@ void MSDFPregen::ExecutePreGeneration() {
 
             printf("%zu. %s %s", i + 1, req.familyName.c_str(), req.styleName.c_str());
 
-            MSDFCache probe(nullptr, 0, req.familyName.c_str(), req.styleName.c_str(),
+            // The data is part of the cache key (the folder carries its hash).
+            MSDFCache probe(req.data, req.size, req.familyName.c_str(), req.styleName.c_str(),
                 MSDF::SDF_RENDER_SIZE, MSDF::SDF_SPREAD);
             size_t count = probe.GetManifestSize();
             if (count > 0) {

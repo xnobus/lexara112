@@ -204,11 +204,11 @@ using FontHash = uint64_t;
 
 // [1.12] FNV-1a over a BOUNDED sample of the file instead of every byte.
 //
-// This value never leaves the process: MSDFManager::RegisterFont turns it into a
-// fontId, and that id is only the first half of the BlockKey under which a mapped
-// cache block is kept in memory. Nothing on disk carries it - the cache directory
-// is named from the family and style (MSDFCache::GetCacheBasePath) - so the shape
-// of the hash is free to change and no user's cache is invalidated.
+// This value names the glyph cache on disk: MSDFCache::GetCacheBasePath puts it in
+// the folder name next to the family and style, because those alone let two
+// different font files share one cache (see there). MSDFManager::RegisterFont also
+// turns it into the fontId half of the in-memory BlockKey. Changing the shape of the
+// hash therefore renames every cache folder - the glyphs are regenerated once.
 //
 // The full walk cost real time on the client this runs on. Every byte does a 64-bit
 // multiply, which on the 32-bit build is a three-multiply sequence, and the CJK
@@ -219,7 +219,8 @@ using FontHash = uint64_t;
 // The sample is head, middle and tail, with the length mixed in first. Two
 // different typefaces would have to agree on their size AND on all three windows to
 // collide; for real font files, where the head alone holds the table directory with
-// its per-table offsets and checksums, that does not happen.
+// its per-table offsets and checksums (glyf and hmtx included, so any change to an
+// outline or an advance changes it), that does not happen.
 inline FontHash HashFont(const FT_Byte* data, FT_Long size) {
     uint64_t h = 0xcbf29ce484222325ULL;
     const auto mix = [&h](const FT_Byte* p, FT_Long n) {

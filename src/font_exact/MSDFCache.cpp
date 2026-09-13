@@ -9,12 +9,14 @@ MSDFCache::MSDFCache(const FT_Byte* fontData, FT_Long dataSize, const char* fami
     uint32_t sdfRenderSize, uint32_t sdfSpread)
     : m_key{ .sdfRenderSize = sdfRenderSize, .sdfSpread = sdfSpread }
 {
-    m_cacheBasePath = GetCacheBasePath(familyName, styleName, sdfRenderSize, sdfSpread);
+    const FontHash fontHash = HashFont(fontData, dataSize);
+
+    m_cacheBasePath = GetCacheBasePath(familyName, styleName, fontHash, sdfRenderSize, sdfSpread);
     m_cacheManifestPath = m_cacheBasePath / "manifest.dat";
     m_cacheManifestLockPath = m_cacheBasePath / "manifest.lock";
     m_cacheManifestJournalPath = m_cacheBasePath / "manifest.jrn";
 
-    m_fontID = MSDFManager::RegisterFont(HashFont(fontData, dataSize));
+    m_fontID = MSDFManager::RegisterFont(fontHash);
 
     std::error_code ec;
     std::filesystem::create_directories(m_cacheBasePath, ec);
@@ -44,11 +46,23 @@ std::string MSDFCache::SanitizeName(std::string_view name) {
     return out.empty() ? "unnamed" : out;
 }
 
-std::string MSDFCache::GetCacheBasePath(const char* familyName, const char* styleName,
+// [1.12] The font file's hash is part of the folder name. It used to be family and
+// style alone, and those are not an identity: FreeType takes them from name IDs
+// 21/16 before 1, which font repacks routinely leave untouched. ContinuumCN.ttf
+// from a Chinese repack names itself "continuumCN" in IDs 1/4/6 and still reports
+// "War Sans CN" / "UI Condensed Medium" through 16/17 - the names of the base font
+// it was built from. Any other file carrying the same pair read and wrote ONE cache
+// with it, so each drew whichever glyph the other had generated first: shapes and
+// bearings of one font laid out with the advances of the other. That matches the
+// "wrong spacing" report - glyphs too narrow for their advance, and a '1' with a
+// flag where ContinuumCN has a plain bar. See docs/glyph-cache-collision.md.
+std::string MSDFCache::GetCacheBasePath(const char* familyName, const char* styleName, FontHash fontHash,
     uint32_t sdfRenderSize, uint32_t sdfSpread) {
     std::string fam = SanitizeName(familyName);
     std::string sty = SanitizeName(styleName);
-    std::string folderName = fam + "_" + sty + "_s" + std::to_string(sdfRenderSize) + "_sp" + std::to_string(sdfSpread);
+    char hashHex[17];
+    snprintf(hashHex, sizeof(hashHex), "%016llX", static_cast<unsigned long long>(fontHash));
+    std::string folderName = fam + "_" + sty + "_" + hashHex + "_s" + std::to_string(sdfRenderSize) + "_sp" + std::to_string(sdfSpread);
     wchar_t tempPath[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tempPath);
     std::filesystem::path base = std::filesystem::path(tempPath) / CACHE_DIR / folderName;
