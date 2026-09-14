@@ -970,6 +970,14 @@ namespace {
             jmp IGxuFontProcessBatch_site_jmpback;
         }
     }
+    // [1.12] The upper bound is 0AAA8h (10922 quads), not 3.3.5's 0FFFCh. Every
+    // chunk of this size is one draw, and bufalloc stores that draw's index count
+    // in a WORD (005C8FB9 `mov [ebp-8],di`, read back at 005A1013
+    // `mov cx,[esi-2]`). 0FFFCh vertices are 98298 indices, which wrapped to
+    // 32762: two thirds of a big batch were never drawn, and since the client
+    // writes all shadow quads of a string before its text quads, what survived
+    // was black. Seen on a multiline EditBox (ElvUI chat copy) past ~5.5k glyphs.
+    // 10922 * 6 = 65532 still fits; bigger batches go out in more chunks.
     __declspec(naked) void CGxDevice__BufStream_siteHk() {
         __asm {
             mov eax, g_runtimeVBSize;
@@ -978,9 +986,9 @@ namespace {
             mov eax, 800h;
             jmp do_push;
         check_upper:
-            cmp eax, 0FFFCh;
+            cmp eax, 0AAA8h;
             jle do_push;
-            mov eax, 0FFFCh;
+            mov eax, 0AAA8h;
         do_push:
             mov g_runtimeVBSize, eax;
             push eax;
