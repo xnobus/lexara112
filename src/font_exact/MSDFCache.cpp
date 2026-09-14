@@ -93,7 +93,8 @@ std::string MSDFCache::GetCacheBasePath(const char* familyName, const char* styl
     std::string sty = SanitizeName(styleName);
     char hashHex[17];
     snprintf(hashHex, sizeof(hashHex), "%016llX", static_cast<unsigned long long>(fontHash));
-    std::string folderName = fam + "_" + sty + "_" + hashHex + "_s" + std::to_string(sdfRenderSize) + "_sp" + std::to_string(sdfSpread);
+    std::string folderName = fam + "_" + sty + "_" + hashHex + "_s" + std::to_string(sdfRenderSize) + "_sp" + std::to_string(sdfSpread) +
+        "_g" + std::to_string(GENERATOR_REVISION);
     wchar_t tempPath[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tempPath);
     std::filesystem::path base = std::filesystem::path(tempPath) / CACHE_DIR / folderName;

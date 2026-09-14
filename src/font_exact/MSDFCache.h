@@ -63,6 +63,12 @@ public:
 private:
     static constexpr auto* CACHE_DIR = "LEXARA";
     static constexpr uint32_t CACHE_VERSION = 1;
+    // [1.12] Ends the cache folder name; bumped whenever the generator draws a glyph
+    // differently, so glyphs an older build drew are never served again. Not
+    // CACHE_VERSION: a manifest with another version fails to load, and StoreGlyph
+    // then refuses every glyph for that folder for the rest of the session.
+    //   2 - no winding preprocessing (docs/third-party-fonts.md)
+    static constexpr uint32_t GENERATOR_REVISION = 2;
     static constexpr uint32_t BLOCK_MAGIC = 0x4D534442;
     static constexpr uint32_t MANIFEST_MAGIC = 0x4D534D46;
     // [1.12] Pending glyphs used to be written every 64 - on the rendering thread,

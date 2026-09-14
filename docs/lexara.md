@@ -71,8 +71,8 @@ the full diff of the port lives in the git history.
 - `src/font_exact/D3D.cpp` - the device layer rewritten: instead of seven
   `CGxDevice` hooks, the chain `LoadLibrary -> Direct3DCreate9 -> CreateDevice`.
 - `src/font_exact/MSDF.h` - font shader globals removed.
-- `src/font_exact/MSDFValidator.h`, `MSDFFont.cpp` -
-  `MSDFCompat::ResolveShapeGeometry`.
+- `src/font_exact/MSDFValidator.h`, `MSDFFont.cpp` - no `resolveShapeGeometry`
+  (no Skia), and no self-intersection test that only Skia's output could pass.
 - `src/dllmain112.cpp` - replaces the original's `dllmain.cpp` + `Proxy.cpp`
   proxy layer (see above).
 
@@ -137,10 +137,12 @@ code.
 Detours (with an added `CMakeLists.txt` and a `detours.h` forwarder),
 unordered_dense.
 
-**msdfgen without Skia has no `resolveShapeGeometry`** - replaced in `MSDFCompat.h`
-with the same thing msdfgen itself uses in its place (`shape.orientContours()`,
-`main.cpp:1155`). The price: glyphs with overlapping contours may show an artefact
-at the intersection. Not observed, but not deliberately measured either.
+**msdfgen without Skia has no `resolveShapeGeometry`** - the port does no geometry
+preprocessing, which is msdfgen's own default without Skia (`main.cpp:577`).
+Measured on 260 fonts: overlapping and self-intersecting contours come out matching
+their outline. The first stand-in, `orientContours`, cut overlaps out of glyphs, and
+the validator's self-intersection test turned such fonts away entirely - see
+[`third-party-fonts.md`](third-party-fonts.md).
 
 **Toolchain:** neither the system nor VS provides CMake (Community 2022 comes
 without the toolset - the toolset is in **BuildTools**). CMake comes from pip. Run
@@ -160,4 +162,3 @@ without the toolset - the toolset is in **BuildTools**). CMake comes from pip. R
   immediately, but any retry of the upload from the pool would read freed memory.
 - Performance and memory measurements against `d3d9.textureMemory = 64` (the limit
   is the number of LIVE TEXTURE MAPPINGS, not the amount of memory itself).
-- The quality of decorative typefaces without `resolveShapeGeometry` (see above).

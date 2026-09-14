@@ -2,7 +2,6 @@
 #include "../Logger.h"
 #include "MSDFCache.h"
 #include "MSDFValidator.h"
-#include "MSDFCompat.h"
 #include "MSDFUtils.h"
 #include <atomic>
 #include <ranges>
@@ -19,7 +18,8 @@ MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize)
         face->family_name ? face->family_name : "Unknown", face->style_name ? face->style_name : "",
         MSDF::SDF_RENDER_SIZE, MSDF::SDF_SPREAD);
 
-    m_isValid = m_cache->GetManifestSize() || MSDF::ALLOW_UNSAFE_FONTS || MSDFValidator::IsFontMSDFCompatible(m_msdfFont);
+    m_isValid = m_cache->GetManifestSize() || MSDF::ALLOW_UNSAFE_FONTS ||
+        MSDFValidator::IsFontMSDFCompatible(m_msdfFont, &m_rejectedCodepoint);
     if (m_isValid) m_glyphPool.reserve(4096);
 }
 
@@ -54,7 +54,22 @@ MSDFFont* MSDFFont::Get(FT_Face face) {
 void MSDFFont::Register(FT_Face face, const FT_Byte* data, FT_Long size) {
     if (s_fontHandles.find(face) != s_fontHandles.end()) return;
     auto font = std::make_unique<MSDFFont>(face, data, size);
-    if (font->m_msdfFont && font->m_isValid) s_fontHandles[face] = std::move(font);
+    if (font->m_msdfFont && font->m_isValid) {
+        s_fontHandles[face] = std::move(font);
+        return;
+    }
+    // [1.12] A font turned away here is drawn by the client's own renderer, and issue
+    // #3 arrived with nothing in the log but `handle=00000000` to show for it. Once
+    // per file - the client opens a face per size and recreates them in bursts.
+    static ankerl::unordered_dense::set<FontHash> s_reported;
+    if (!s_reported.insert(HashFont(data, size)).second) return;
+    const char* family = face->family_name ? face->family_name : "";
+    if (!font->m_msdfFont) {
+        Log("[MSDF] font NOT drawn by MSDF: msdfgen cannot load '%s' (size=%ld)", family, (long)size);
+    } else {
+        Log("[MSDF] font NOT drawn by MSDF: '%s' glyph U+%04X failed validation (size=%ld)",
+            family, font->m_rejectedCodepoint, (long)size);
+    }
 }
 
 void MSDFFont::Unregister(FT_Face face) {
@@ -518,7 +533,14 @@ bool MSDFFont::GenerateMSDF(msdfgen::FontHandle* handle, std::vector<uint8_t>& o
         return true;
     }
 
-    MSDFCompat::ResolveShapeGeometry(shape);  // [1.12] msdfgen without Skia - see MSDFCompat.h
+    // [1.12] No geometry preprocessing - msdfgen's own default without Skia
+    // (main.cpp:577). Upstream calls resolveShapeGeometry here, which needs Skia. The
+    // port first stood orientContours in for it, but that one assumes even-odd fill
+    // and no self-intersections (main.cpp:523): on overlapping contours it reversed
+    // one of them, and the nonzero pass below then cut the overlap out of the glyph -
+    // a gap across Cascadia Code's `E` stem, a hole in Bahnschrift's `A` crossbar.
+    // overlapSupport and the sign pass handle overlapping and self-intersecting
+    // contours by themselves. See docs/third-party-fonts.md.
     msdfgen::edgeColoringInkTrap(shape, 3.0, 0);
 
     auto bounds = shape.getBounds();

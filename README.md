@@ -151,9 +151,10 @@ it):
 | `Detours` | github.com/microsoft/Detours | added: `CMakeLists.txt` and a `detours.h` forwarder |
 | `unordered_dense_src` | github.com/martinus/unordered_dense | header only |
 
-**msdfgen without Skia** has no `resolveShapeGeometry`; it is replaced in
-`src/font_exact/MSDFCompat.h` with the same thing msdfgen itself uses in its place
-(`shape.orientContours()`, `main.cpp:1155`).
+**msdfgen without Skia** has no `resolveShapeGeometry`. The port does no geometry
+preprocessing instead - msdfgen's own default without Skia (`main.cpp:577`) -
+and leaves overlapping and self-intersecting contours to `overlapSupport` and the
+nonzero sign pass. See [`docs/third-party-fonts.md`](docs/third-party-fonts.md).
 
 ## Documentation
 

@@ -358,6 +358,11 @@ uses it as the fallback under the `#else` to `MSDFGEN_USE_SKIA`. The price: glyp
 with overlapping contours may show an artefact at the intersection - to be checked
 by measurement.
 
+*Corrected 2026-09-14:* `main.cpp:1155` is the opt-in `-windingpreprocess`; msdfgen's
+default without Skia is no preprocessing (`main.cpp:577`). Measured, `orientContours`
+did cut overlaps out of glyphs, and the port now does no preprocessing - see
+[`third-party-fonts.md`](third-party-fonts.md).
+
 ### Ported to 1.12 and built into the DLL
 
 Post-build check (searching the binary for constants): all the new addresses are

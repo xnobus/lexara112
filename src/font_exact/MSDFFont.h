@@ -82,6 +82,7 @@ private:
     FT_Face m_ftFace;
     msdfgen::FontHandle* m_msdfFont;
     bool m_isValid;
+    uint32_t m_rejectedCodepoint = 0;  // the glyph that failed validation, for the log
 
     // The client's buffer, alive exactly as long as this face. Copied into m_blob
     // only when the first glyph has to be generated - a font whose glyphs are all

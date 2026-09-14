@@ -1,14 +1,16 @@
 #pragma once
 
-#include "MSDFCompat.h"
+#include <msdfgen.h>
 
 class MSDFValidator {
 public:
-    static bool IsFontMSDFCompatible(msdfgen::FontHandle* font) {
+    // [1.12] `failedCodepoint` receives the first glyph that failed, for the log.
+    static bool IsFontMSDFCompatible(msdfgen::FontHandle* font, uint32_t* failedCodepoint = nullptr) {
         if (!font) return false;
 
         for (uint32_t cp = 32; cp < 127; ++cp) {
             if (!IsGlyphValid(font, cp)) {
+                if (failedCodepoint) *failedCodepoint = cp;
                 return false;
             }
         }
@@ -104,64 +106,6 @@ private:
         flattenCubic(p0123, p123, p23, p3, out, tol, depth + 1);
     }
 
-    static int orient(const Vec& a, const Vec& b, const Vec& c) {
-        const double v = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-        return (v > EPS) - (v < -EPS);
-    }
-
-    static bool onSegment(const Vec& a, const Vec& b, const Vec& p) {
-        if (orient(a, b, p) != 0) return false;
-        return std::min(a.x, b.x) - EPS <= p.x && p.x <= std::max(a.x, b.x) + EPS &&
-            std::min(a.y, b.y) - EPS <= p.y && p.y <= std::max(a.y, b.y) + EPS;
-    }
-
-    static bool segsIntersectProper(const Vec& a1, const Vec& a2, const Vec& b1, const Vec& b2) {
-        const int o1 = orient(a1, a2, b1);
-        const int o2 = orient(a1, a2, b2);
-        const int o3 = orient(b1, b2, a1);
-        const int o4 = orient(b1, b2, a2);
-
-        if (o1 != o2 && o3 != o4) return true;
-
-        if (o1 == 0 && onSegment(a1, a2, b1)) return true;
-        if (o2 == 0 && onSegment(a1, a2, b2)) return true;
-        if (o3 == 0 && onSegment(b1, b2, a1)) return true;
-        if (o4 == 0 && onSegment(b1, b2, a2)) return true;
-
-        return false;
-    }
-
-    static bool hasSelfIntersections(const std::vector<Vec>& pts) {
-        const size_t n = pts.size();
-        if (n < 4) return false;
-
-        for (size_t i = 0; i < n; ++i) {
-            const Vec& a1 = pts[i];
-            const Vec& a2 = pts[(i + 1) % n];
-
-            if (Vec(a2.x - a1.x, a2.y - a1.y).lengthSq() <= EPS * EPS) continue;
-
-            for (size_t j = i + 2; j < n; ++j) {
-                if (i == 0 && j == n - 1) continue;
-
-                const Vec& b1 = pts[j];
-                const Vec& b2 = pts[(j + 1) % n];
-
-                if (Vec(b2.x - b1.x, b2.y - b1.y).lengthSq() <= EPS * EPS) continue;
-
-                if (segsIntersectProper(a1, a2, b1, b2)) {
-                    const bool shareEndpoint =
-                        (Vec(a1.x - b1.x, a1.y - b1.y).lengthSq() <= EPS * EPS) ||
-                        (Vec(a1.x - b2.x, a1.y - b2.y).lengthSq() <= EPS * EPS) ||
-                        (Vec(a2.x - b1.x, a2.y - b1.y).lengthSq() <= EPS * EPS) ||
-                        (Vec(a2.x - b2.x, a2.y - b2.y).lengthSq() <= EPS * EPS);
-                    if (!shareEndpoint) return true;
-                }
-            }
-        }
-        return false;
-    }
-
     struct DecomposeCtx {
         std::vector<std::vector<Vec>> contours;
         std::vector<Vec> current;
@@ -246,7 +190,6 @@ private:
                 }
             }
             if (!hasNonDegenerateEdge) return false;
-            if (hasSelfIntersections(cont)) return false;
         }
         return true;
     }
@@ -320,7 +263,13 @@ private:
                 }
             }
             if (!hasNonDegenerateEdge) return false;
-            if (hasSelfIntersections(pts)) return false;
+            // [1.12] No self-intersection test. Upstream runs this on the output of
+            // Skia's resolveShapeGeometry, which cannot contain one. The port has no
+            // Skia, so the test judged the font file's raw contours instead and
+            // turned away every font with one self-intersecting glyph among 32..126:
+            // 12 of 260 fonts measured (Bahnschrift, Cascadia, Inconsolata, Vegur...),
+            // each then drawn blurry by the client's own renderer. Those glyphs come
+            // out of GenerateMSDF matching their outline. See docs/third-party-fonts.md.
         }
         return true;
     }
@@ -332,7 +281,6 @@ private:
         msdfgen::Shape shape;
         if (!msdfgen::loadGlyph(shape, font, codepoint))  return false;
         if (shape.contours.empty()) return true;
-        MSDFCompat::ResolveShapeGeometry(shape);  // [1.12] msdfgen without Skia
         return validateResolvedShape(shape, tol);
     }
 };
