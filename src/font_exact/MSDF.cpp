@@ -150,7 +150,14 @@ namespace {
     constexpr uintptr_t bufalloc_3_site_jmpback = 0x005C913D;                                  // 006C4C4B
 
     bool s_msdfInitHookArmed = false;
-    std::vector<uint32_t> s_prefetchPayload;
+    // [1.12] Each codepoint with the face whose line it came from. The prefetch used
+    // to look every codepoint up in the face of the batch it ran in, but a line is
+    // not only laid out inside its own batch's loop - CheckGeometry is also called
+    // through 005C27F0 (from 0044DC40) - and such codepoints went to whichever face's
+    // batch came next: generation requests and atlas cells for glyphs that face never
+    // draws, while the face that does draw them uploaded them later, inside
+    // ProcessGeometry.
+    std::vector<std::pair<FT_Face, uint32_t>> s_prefetchPayload;
 
     // ------------------------------------------------------------------
     // [1.12] The top byte of CGxString::m_flags is ours:
@@ -189,25 +196,41 @@ namespace {
         if (n <= 30 || (n % 200) == 0) Log("[MSDF] slow %s: %.1f ms (detail=%u, #%d)", what, ms, detail, n);
     }
 
-    void __cdecl PrefetchCodepoints(CGxString* pThis) {
+    // The batch's first string still comes in from the site stub; the faces travel
+    // with the codepoints now, so it is not needed.
+    void __cdecl PrefetchCodepoints(CGxString*) {
         if (s_prefetchPayload.empty()) return;
         // [1.12] With no device there is no atlas, so a prefetch would only
         // generate glyphs with nowhere to store them. We defer them instead.
         if (!D3D::GetDevice()) return;
-        if (!pThis || reinterpret_cast<uintptr_t>(pThis) & 1) return;
 
         const double start = NowMs();
         const size_t count = s_prefetchPayload.size();
-        if (MSDFFont* fontHandle = MSDFFont::Get(pThis->GetFontFace())) {
-            std::ranges::sort(s_prefetchPayload);
-            s_prefetchPayload.erase(std::ranges::unique(s_prefetchPayload).begin(), s_prefetchPayload.end());
-            for (uint32_t codepoint : s_prefetchPayload) {
-                fontHandle->GetGlyph(codepoint);
+        std::ranges::sort(s_prefetchPayload);
+        s_prefetchPayload.erase(std::ranges::unique(s_prefetchPayload).begin(), s_prefetchPayload.end());
+        FT_Face face = nullptr;
+        MSDFFont* fontHandle = nullptr;
+        for (const auto& [entryFace, codepoint] : s_prefetchPayload) {
+            if (entryFace != face) {
+                face = entryFace;
+                fontHandle = MSDFFont::Get(face);
             }
+            if (fontHandle) fontHandle->GetGlyph(codepoint);
         }
         s_prefetchPayload.clear();
         ReportIfSlow("prefetch", start, static_cast<uint32_t>(count));
     }
+
+    // [1.12] A quad's glyph, looked up before any vertex is written. A copy, not the
+    // pointer GetGlyph returns: that one points into a dense map which the next
+    // lookup can grow and move.
+    struct QuadGlyph {
+        enum class State : uint8_t { NoCodepoint, Hidden, Drawn };
+        State state = State::NoCodepoint;
+        uint32_t codepoint = 0;
+        GlyphMetrics metrics;
+    };
+    std::vector<QuadGlyph> g_quadGlyphs;
 
     void __fastcall ProcessGeometry(CGxString* pThis) {
         if (g_inDamageBatch && !(pThis->m_flags & 0x40000000) && g_diagDamageSkip < 3) {
@@ -253,61 +276,103 @@ namespace {
         const double scale = (is3d ? fontSizeMult : CGxuFont::GetFontEffectiveHeight(is3d, fontSizeMult) * 0.98) / MSDF::SDF_RENDER_SIZE;
         const double pad = MSDF::SDF_SPREAD * scale;
         const double start = NowMs();
+
+        // [1.12] Every glyph first, the vertices after. A glyph that is not in the
+        // atlas yet is uploaded by GetGlyph, and when the atlas is full that upload
+        // evicts the oldest page - which can hold glyphs this same string has already
+        // been given. Their quads kept pointing at the cleared cells while the string
+        // was stamped with the new eviction count below, so nothing rebuilt it: the
+        // letters stayed blank, or showed whatever glyph was uploaded into those
+        // cells next, until the client laid the line out again. Reproduced on the
+        // login screen by evicting after the third quad: "This is a private server"
+        // stayed "cn s is a private server". A lookup pass that saw an eviction is
+        // now repeated - the glyphs it lost go back into the freed page - and bounded
+        // for a string whose glyphs do not fit the atlas at all.
+        const uint32_t quadCount = verts.m_count / 4;
+        if (g_quadGlyphs.size() < quadCount) g_quadGlyphs.resize(quadCount);
         bool anyPending = false;
-
-        for (uint32_t q = 0; q < verts.m_count; q += 4) {
-            CGxFontVertex* vBase = &verts.m_data[q];
-            if (vBase[0].u > 1.0f) {
-                const uint32_t codepoint = vBase[0].u - 1.0f;
-
-                bool glyphPending = false;
-                const GlyphMetrics* gm = fontHandle->GetGlyph(codepoint, &glyphPending);
-                if (!gm) {
-                    // [1.12] Nothing to draw it with - still being generated, or
-                    // failed. The quad used to keep the codepoint in its UVs and the
-                    // shader sampled whatever sat at the edge of the atlas; collapse
-                    // it instead. u = 0 also keeps it out of a second pass.
-                    for (int i = 1; i < 4; ++i) vBase[i].pos = vBase[0].pos;
-                    for (int i = 0; i < 4; ++i) { vBase[i].u = 0.0f; vBase[i].v = 0.0f; }
-                    anyPending |= glyphPending;
+        for (uint32_t attempt = 1;; ++attempt) {
+            const size_t evictions = MSDFFont::GetAtlasEvictionCount();
+            anyPending = false;
+            for (uint32_t q = 0; q < quadCount; ++q) {
+                QuadGlyph& glyph = g_quadGlyphs[q];
+                const float u = verts.m_data[q * 4].u;
+                if (!(u > 1.0f)) {
+                    glyph.state = QuadGlyph::State::NoCodepoint;
                     continue;
                 }
-
-                CGxGlyphCacheEntry* entry = fontObj->GetOrCreateGlyphEntry(codepoint);
-                if (!entry) continue;
-
-                CGxFontVertex* vert0 = &vBase[0];
-                CGxFontVertex* vert1 = &vBase[1];
-                CGxFontVertex* vert2 = &vBase[2];
-                CGxFontVertex* vert3 = &vBase[3];
-
-                const double leftOffs = fontObj->GetBearingX(entry, is3d, fontSizeMult);
-                const double bitmapLeft = is3d ? leftOffs : gm->bitmapLeft * scale - leftOffs;
-
-                const double newLeft = static_cast<double>(vert0->pos.X) + (bitmapLeft != leftOffs ? bitmapLeft + 1.0 : 0.0) - pad + fontOffs * 0.5;
-                const double newRight = newLeft + (gm->width * scale);
-
-                const double newTop = static_cast<double>(vert1->pos.Y) + (gm->bitmapTop * scale) + pad - baselineOffs;
-                const double newBottom = newTop - (gm->height * scale);
-
-                vert0->pos.X = static_cast<float>(newLeft);  vert0->pos.Y = static_cast<float>(newBottom);
-                vert1->pos.X = static_cast<float>(newLeft);  vert1->pos.Y = static_cast<float>(newTop);
-                vert2->pos.X = static_cast<float>(newRight); vert2->pos.Y = static_cast<float>(newBottom);
-                vert3->pos.X = static_cast<float>(newRight); vert3->pos.Y = static_cast<float>(newTop);
-
-                const float u0 = gm->u0;
-                const float u1 = gm->u1;
-                const float v0 = gm->v0;
-                const float v1 = gm->v1;
-
-                const float uSign = (gm->atlasPageIndex & 1) ? -1.0f : 1.0f;
-                const float vSign = (gm->atlasPageIndex & 2) ? -1.0f : 1.0f;
-
-                vert0->u = u0 * uSign; vert0->v = v0 * vSign;
-                vert1->u = u0 * uSign; vert1->v = v1 * vSign;
-                vert2->u = u1 * uSign; vert2->v = v0 * vSign;
-                vert3->u = u1 * uSign; vert3->v = v1 * vSign;
+                glyph.codepoint = static_cast<uint32_t>(u - 1.0f);
+                bool glyphPending = false;
+                if (const GlyphMetrics* gm = fontHandle->GetGlyph(glyph.codepoint, &glyphPending)) {
+                    glyph.metrics = *gm;
+                    glyph.state = QuadGlyph::State::Drawn;
+                }
+                else {
+                    glyph.state = QuadGlyph::State::Hidden;
+                    anyPending |= glyphPending;
+                }
             }
+            if (MSDFFont::GetAtlasEvictionCount() == evictions) break;
+            if (attempt == MSDF::MAX_ATLAS_PAGES) {
+                static int n = 0;
+                if (++n <= 5) {
+                    Log("[MSDF] ProcessGeometry: the atlas evicted during each of %u lookups of one string (%u quads)"
+                        " - its glyphs do not fit, some of them may stay blank", attempt, quadCount);
+                }
+                break;
+            }
+        }
+
+        for (uint32_t q = 0; q < quadCount; ++q) {
+            const QuadGlyph& glyph = g_quadGlyphs[q];
+            CGxFontVertex* vBase = &verts.m_data[q * 4];
+            if (glyph.state == QuadGlyph::State::NoCodepoint) continue;
+            const uint32_t codepoint = glyph.codepoint;
+            if (glyph.state == QuadGlyph::State::Hidden) {
+                // [1.12] Nothing to draw it with - still being generated, or
+                // failed. The quad used to keep the codepoint in its UVs and the
+                // shader sampled whatever sat at the edge of the atlas; collapse
+                // it instead. u = 0 also keeps it out of a second pass.
+                for (int i = 1; i < 4; ++i) vBase[i].pos = vBase[0].pos;
+                for (int i = 0; i < 4; ++i) { vBase[i].u = 0.0f; vBase[i].v = 0.0f; }
+                continue;
+            }
+            const GlyphMetrics* gm = &glyph.metrics;
+
+            CGxGlyphCacheEntry* entry = fontObj->GetOrCreateGlyphEntry(codepoint);
+            if (!entry) continue;
+
+            CGxFontVertex* vert0 = &vBase[0];
+            CGxFontVertex* vert1 = &vBase[1];
+            CGxFontVertex* vert2 = &vBase[2];
+            CGxFontVertex* vert3 = &vBase[3];
+
+            const double leftOffs = fontObj->GetBearingX(entry, is3d, fontSizeMult);
+            const double bitmapLeft = is3d ? leftOffs : gm->bitmapLeft * scale - leftOffs;
+
+            const double newLeft = static_cast<double>(vert0->pos.X) + (bitmapLeft != leftOffs ? bitmapLeft + 1.0 : 0.0) - pad + fontOffs * 0.5;
+            const double newRight = newLeft + (gm->width * scale);
+
+            const double newTop = static_cast<double>(vert1->pos.Y) + (gm->bitmapTop * scale) + pad - baselineOffs;
+            const double newBottom = newTop - (gm->height * scale);
+
+            vert0->pos.X = static_cast<float>(newLeft);  vert0->pos.Y = static_cast<float>(newBottom);
+            vert1->pos.X = static_cast<float>(newLeft);  vert1->pos.Y = static_cast<float>(newTop);
+            vert2->pos.X = static_cast<float>(newRight); vert2->pos.Y = static_cast<float>(newBottom);
+            vert3->pos.X = static_cast<float>(newRight); vert3->pos.Y = static_cast<float>(newTop);
+
+            const float u0 = gm->u0;
+            const float u1 = gm->u1;
+            const float v0 = gm->v0;
+            const float v1 = gm->v1;
+
+            const float uSign = (gm->atlasPageIndex & 1) ? -1.0f : 1.0f;
+            const float vSign = (gm->atlasPageIndex & 2) ? -1.0f : 1.0f;
+
+            vert0->u = u0 * uSign; vert0->v = v0 * vSign;
+            vert1->u = u0 * uSign; vert1->v = v1 * vSign;
+            vert2->u = u1 * uSign; vert2->v = v0 * vSign;
+            vert3->u = u1 * uSign; vert3->v = v1 * vSign;
         }
         if (diag) {
             DiagDamageQuad("after ", pThis);
@@ -329,7 +394,7 @@ namespace {
             token = TOKEN_BUILT | (fontHandle->GetAtlasEvictionCount() & TOKEN_COUNT_MASK);
         }
         pThis->m_flags = (pThis->m_flags & 0x00FFFFFF) | (token << 24);
-        ReportIfSlow("ProcessGeometry", start, verts.m_count / 4);
+        ReportIfSlow("ProcessGeometry", start, quadCount);
     }
 
     bool __fastcall CGxString__CheckGeometryHk(CGxString* pThis) {
@@ -829,6 +894,7 @@ namespace {
         // non-ASCII character also asked for 2-3 Latin-1 glyphs (lead and
         // continuation bytes, 0x80-0xFF) that nothing draws - with synchronous
         // generation that was up to ~10 ms each on the rendering thread.
+        const FT_Face face = pThis->GetFontFace();
         for (const unsigned char* p = reinterpret_cast<const unsigned char*>(pThis->m_text); p && *p;) {
             uint32_t codepoint = *p++;
             const int extra = codepoint < 0x80 ? 0 : (codepoint >> 5) == 0x06 ? 1 : (codepoint >> 4) == 0x0E ? 2 : (codepoint >> 3) == 0x1E ? 3 : -1;
@@ -836,7 +902,7 @@ namespace {
             codepoint &= 0x7F >> extra;
             int got = 0;
             for (; got < extra && (*p & 0xC0) == 0x80; ++got, ++p) codepoint = (codepoint << 6) | (*p & 0x3F);
-            if (got == extra) s_prefetchPayload.push_back(codepoint);
+            if (got == extra) s_prefetchPayload.emplace_back(face, codepoint);
         }
         pThis->m_flags |= 0x40000000;
         return result;
@@ -1070,6 +1136,8 @@ namespace {
     }
 
     int __fastcall FreeType_Done_FaceHk(FT_Face face) {
+        // The address can come back as a different font before the next prefetch.
+        std::erase_if(s_prefetchPayload, [face](const auto& entry) { return entry.first == face; });
         MSDFFont::Unregister(face);
         return FT_Done_Face(face);
     }

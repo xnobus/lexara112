@@ -356,6 +356,8 @@ bool MSDFPregen::GenerateFont(const PreGenRequest& req) {
             {
                 std::lock_guard<std::mutex> lock(cacheMutex);
                 if (!cache.StoreGlyph(std::move(gm))) printf("WARNING: Failed to store glyph U+%04X\n", cp);
+                // StoreGlyph no longer flushes at the ceiling by itself.
+                if (cache.m_pendingBytes >= MSDFCache::MAX_PENDING_BYTES) cache.FlushPendingWrites();
             }
             doneCount.fetch_add(1, std::memory_order_relaxed);
         }

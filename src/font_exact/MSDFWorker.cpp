@@ -139,10 +139,12 @@ namespace {
 
     void StartWorkers() {
         const unsigned hw = std::thread::hardware_concurrency();
-        // Below normal priority and at most three: the client's own thread, DXVK's
-        // and the driver's need the cores more than a glyph that can arrive a few
-        // frames late.
-        const unsigned count = std::clamp(hw / 4, 1u, 3u);
+        // Below normal priority, and half the hardware threads minus two for the
+        // client's own thread, DXVK's and the driver's: 8 threads -> 2 workers,
+        // 12 -> 4, 16 and up -> 6. Until a worker finishes it a glyph is not drawn at
+        // all, and a CJK one takes ~52 ms; hw / 4 capped at three gave the CJK
+        // reporter's 16-thread machine three workers for a chat full of new hanzi.
+        const unsigned count = std::clamp(hw > 4 ? hw / 2 - 2 : 1u, 1u, 6u);
         for (unsigned i = 0; i < count; ++i) std::thread(WorkerMain).detach();
         Log("[MSDF] glyph workers started: %u (hardware threads %u)", count, hw);
     }

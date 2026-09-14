@@ -287,6 +287,7 @@ void MSDFFont::IntegrateGeneratedGlyphs() {
         }
     }
     results.clear();
+    MSDFCache::FlushOverCeiling(1);
     ++s_readyEpoch;
 }
 

@@ -49,6 +49,9 @@ public:
     // block files per call. Rendering thread; meant for moments with no generation
     // in progress, so the cost never lands on top of a burst.
     static void FlushSome(size_t maxBlocks);
+    // The same, but only for a cache holding more than MAX_PENDING_BYTES - called
+    // while generation is still busy.
+    static void FlushOverCeiling(size_t maxBlocks);
 
     FontHash GetFontHash() const { return m_fontHash; }
 
@@ -64,8 +67,8 @@ private:
     static constexpr uint32_t MANIFEST_MAGIC = 0x4D534D46;
     // [1.12] Pending glyphs used to be written every 64 - on the rendering thread,
     // one full block-file rewrite per block touched, with an fsync each. They now
-    // wait for FlushSome at an idle moment; this is only the ceiling on the pixel
-    // data held meanwhile (~160 CJK or ~370 Latin glyphs), reached by a flood that
+    // wait for FlushSome at an idle moment; this is only the level (~160 CJK or ~370
+    // Latin glyphs) above which FlushOverCeiling starts writing during a flood that
     // never lets generation go idle.
     static constexpr size_t MAX_PENDING_BYTES = 8 * 1024 * 1024;
     static constexpr size_t BLOCK_SIZE = 512;

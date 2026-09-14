@@ -1,6 +1,7 @@
 #include "MSDFCache.h"
 #include "MSDFManager.h"
 #include <fstream>
+#include <functional>
 #include <ranges>
 
 MSDFManager MSDFCache::s_manager = MSDFManager();
@@ -152,10 +153,22 @@ bool MSDFCache::StoreGlyph(GlyphMetricsToStore&& metrics) {
     m_pendingBytes += metrics.ownedPixelData.size();
     m_pendingWrites.push_back(std::move(metrics));
     m_pendingIndex[m_pendingWrites.back().codepoint] = &m_pendingWrites.back();
-    if (m_pendingBytes >= MAX_PENDING_BYTES) {
-        FlushPendingWrites();
-    }
     return true;
+}
+
+// [1.12] This used to be a full FlushPendingWrites inside StoreGlyph, the moment a
+// cache crossed the ceiling: one call rewrote every block file with a glyph waiting,
+// and CJK glyphs of a flood are spread over dozens of blocks. The CJK reporter's log
+// has it right after login as `slow glyph integration` 344.7, 153.9, 127.9, 123.3 ms.
+// Now each integration pass writes at most `maxBlocks`, the heaviest first.
+void MSDFCache::FlushOverCeiling(size_t maxBlocks) {
+    for (auto& [hash, weak] : s_registry) {
+        std::shared_ptr<MSDFCache> cache = weak.lock();
+        if (cache && cache->m_pendingBytes >= MAX_PENDING_BYTES) {
+            cache->FlushPendingWrites(maxBlocks);
+            return;
+        }
+    }
 }
 
 bool MSDFCache::LoadManifest() {
@@ -348,11 +361,21 @@ bool MSDFCache::FlushPendingWrites(size_t maxBlocks) {
     );
     auto blockEntries = m_mEntryPool.Acquire(maxBlockSize);
 
+    // Heaviest blocks first, so a bounded call frees the most pixel data per file it
+    // rewrites.
+    std::vector<std::pair<size_t, uint32_t>> order;
+    order.reserve(byBlock.size());
+    for (const auto& [blockId, glyphs] : byBlock) {
+        size_t bytes = 0;
+        for (const GlyphMetricsToStore* glyph : glyphs) bytes += glyph->ownedPixelData.size();
+        order.emplace_back(bytes, blockId);
+    }
+    std::ranges::sort(order, std::greater{});
+
     ankerl::unordered_dense::set<uint32_t> writtenBlocks;
     size_t attempted = 0;
-    for (auto& kv : byBlock) {
+    for (const auto& [bytes, blockId] : order) {
         if (attempted++ >= maxBlocks) break;
-        uint32_t blockId = kv.first;
         std::filesystem::path lockPath;
         BuildBlockLockPath(blockId, lockPath);
 
@@ -360,7 +383,7 @@ bool MSDFCache::FlushPendingWrites(size_t maxBlocks) {
         if (!lock.AcquireExclusive(lockPath, 1000)) continue;
 
         blockEntries.clear();
-        if (!WriteBlockFile(blockId, kv.second, blockEntries)) continue;
+        if (!WriteBlockFile(blockId, byBlock[blockId], blockEntries)) continue;
 
         newEntries.insert(newEntries.end(), blockEntries.begin(), blockEntries.end());
         writtenBlocks.insert(blockId);
