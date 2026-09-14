@@ -1,6 +1,7 @@
 #pragma once
 #include "MSDF.h"
 #include "MSDFCache.h"
+#include "MSDFWorker.h"
 #include "../ShutdownCheck.h"
 
 class MSDFFont {
@@ -45,7 +46,20 @@ public:
     static size_t GetAtlasPageCount() { return s_atlasPages.size(); }
     static size_t GetAtlasEvictionCount() { return s_evictionCount; }
 
-    const GlyphMetrics* GetGlyph(uint32_t codepoint);
+    // nullptr when the glyph cannot be drawn now. `pending` (optional) is set when
+    // that is because it is being generated - the caller should lay the string out
+    // again once GetReadyEpoch() moves.
+    const GlyphMetrics* GetGlyph(uint32_t codepoint, bool* pending = nullptr);
+
+    // Worker thread: everything GetGlyph used to do inline for a glyph the cache did
+    // not have. `face` and `handle` belong to the calling thread.
+    static void BuildGlyph(FT_Face face, msdfgen::FontHandle* handle, uint32_t codepoint, GlyphMetricsToStore& out);
+
+    // Rendering thread: hands finished glyphs to their caches and moves the epoch.
+    static void IntegrateGeneratedGlyphs();
+    // Moves whenever glyphs arrive or the atlas evicts - a string laid out with
+    // glyphs still pending is rebuilt when it differs from the value at layout.
+    static uint32_t GetReadyEpoch() { return s_readyEpoch; }
 
     static MSDFFont* Get(FT_Face face);
     static void Register(FT_Face face, const FT_Byte* data, FT_Long size);
@@ -60,12 +74,21 @@ private:
     void InvalidateGlyph(uint32_t codepoint);
     bool UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint);
     bool GenerateMSDF(std::vector<uint8_t>& outData, uint32_t codepoint, int sdfW, int sdfH) const;
+    static bool GenerateMSDF(msdfgen::FontHandle* handle, std::vector<uint8_t>& outData, uint32_t codepoint, int sdfW, int sdfH);
+    bool RequestGeneration(uint32_t codepoint);
 
     static msdfgen::FontHandle* CreateMSDFHandle(const FT_Byte* data, FT_Long size);
 
     FT_Face m_ftFace;
     msdfgen::FontHandle* m_msdfFont;
     bool m_isValid;
+
+    // The client's buffer, alive exactly as long as this face. Copied into m_blob
+    // only when the first glyph has to be generated - a font whose glyphs are all
+    // cached never pays for the copy.
+    const FT_Byte* m_fontData = nullptr;
+    FT_Long m_fontDataSize = 0;
+    std::shared_ptr<const FontBlob> m_blob;
 
     // [1.12] How many entries this typeface has in the shared atlas. Zero means
     // there is no reason to touch the pages on destruction - and that is exactly
@@ -75,7 +98,7 @@ private:
     // rendering thread.
     size_t m_atlasEntryCount = 0;
 
-    std::unique_ptr<MSDFCache> m_cache;
+    std::shared_ptr<MSDFCache> m_cache;
 
     ankerl::unordered_dense::map<uint32_t, GlyphMetrics> m_glyphPool;
 
@@ -97,6 +120,10 @@ private:
     inline static std::vector<std::unique_ptr<AtlasPage>> s_atlasPages;
     inline static uint16_t s_oldestPage = 0;
     inline static uint32_t s_evictionCount = 0;
+    inline static uint32_t s_readyEpoch = 0;
+
+    // One copy of a file's bytes however many faces are open on it.
+    inline static ankerl::unordered_dense::map<FontHash, std::weak_ptr<const FontBlob>> s_blobs;
 
     inline static thread_local VectorPool<float> m_msdfPool;
 };

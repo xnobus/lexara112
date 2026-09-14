@@ -4,17 +4,18 @@
 #include "MSDFValidator.h"
 #include "MSDFCompat.h"
 #include "MSDFUtils.h"
+#include <atomic>
 #include <ranges>
 
 MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize)
-    : m_ftFace(face), m_msdfFont(nullptr), m_isValid(false)
+    : m_ftFace(face), m_msdfFont(nullptr), m_isValid(false), m_fontData(fontData), m_fontDataSize(dataSize)
 {
     if (!face) return;
 
     m_msdfFont = CreateMSDFHandle(fontData, dataSize);
     if (!m_msdfFont) return;
 
-    m_cache = std::make_unique<MSDFCache>(fontData, dataSize,
+    m_cache = MSDFCache::Acquire(fontData, dataSize,
         face->family_name ? face->family_name : "Unknown", face->style_name ? face->style_name : "",
         MSDF::SDF_RENDER_SIZE, MSDF::SDF_SPREAD);
 
@@ -75,6 +76,7 @@ void MSDFFont::ClearAllCache() {
     s_atlasPages.clear();
     s_oldestPage = 0;
     ++s_evictionCount;
+    ++s_readyEpoch;
 }
 
 void MSDFFont::Shutdown() {
@@ -148,6 +150,9 @@ int MSDFFont::EvictOldestPage() {
     }
 
     ++s_evictionCount;
+    // Strings laid out with glyphs pending are versioned by this one instead; they
+    // hold glyphs from the cleared page as well.
+    ++s_readyEpoch;
     // [1.12] docs/shared-atlas.md tells the reader to watch for evictions
     // multiplying in the log - and nothing ever wrote a line for one, which is why
     // issue #2 arrived with a log that shows the symptom and not the cause. An
@@ -168,18 +173,18 @@ int MSDFFont::EvictOldestPage() {
 // "static bool" guard and reported ONLY the first occurrence of each cause - which
 // hid the distribution, and the single entry that did reach the log (a space) was
 // the least interesting case of all. Counters show them all at once.
-static int gNullPixelSize = 0, gNullLoadGlyph = 0, gNullUploadCache = 0,
-           gNullUploadGen = 0, gNullRetry = 0, gOkCache = 0, gOkGen = 0,
-           gOkPool = 0, gNoOutline = 0, gTotal = 0;
+// The generation counters are touched by the worker threads, hence atomic.
+static int gNullUploadCache = 0, gNullUploadGen = 0, gNullRetry = 0, gOkCache = 0, gOkPool = 0, gRequested = 0, gTotal = 0;
+static std::atomic<int> gNullPixelSize{ 0 }, gNullLoadGlyph{ 0 }, gOkGen{ 0 }, gNoOutline{ 0 };
 
 static void DumpGlyphStats() {
-    Log("[MSDF] GetGlyph after %d calls: pool=%d cache=%d gen=%d noOutline=%d",
-        gTotal, gOkPool, gOkCache, gOkGen, gNoOutline);
+    Log("[MSDF] GetGlyph after %d calls: pool=%d cache=%d requested=%d gen=%d noOutline=%d",
+        gTotal, gOkPool, gOkCache, gRequested, gOkGen.load(), gNoOutline.load());
     Log("       NULL: pixelSize=%d loadGlyph=%d uploadCache=%d uploadGen=%d retry=%d",
-        gNullPixelSize, gNullLoadGlyph, gNullUploadCache, gNullUploadGen, gNullRetry);
+        gNullPixelSize.load(), gNullLoadGlyph.load(), gNullUploadCache, gNullUploadGen, gNullRetry);
 }
 
-const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
+const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint, bool* pending) {
     // [1.12] This used to run every 200 calls. At 2.3 million calls per session
     // that meant over 11,000 opens of the log file and hurt performance by itself.
     // [1.12] Statistics are now dumped on demand only (DumpGlyphStats from a
@@ -218,7 +223,7 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
             // anyone's hands yet, ours or the caller's.
             if (!cached.pixelData) {
                 m_glyphPool.erase(pit);
-                return GetGlyph(codepoint);
+                return GetGlyph(codepoint, pending);
             }
             if (!UploadGlyphToAtlas(cached, codepoint)) { ++gNullRetry; return nullptr; }
         }
@@ -241,72 +246,101 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint) {
         return &metrics;
     }
 
-    GlyphMetricsToStore storage;
+    // [1.12] Not in the cache: a worker generates it (MSDFWorker.h has the numbers),
+    // IntegrateGeneratedGlyphs puts the result in the cache, and the string is laid
+    // out again - then TryLoadGlyph above finds it. This used to be generated right
+    // here, on the client's rendering thread.
+    m_glyphPool.erase(it);
+    if (!RequestGeneration(codepoint)) return nullptr;
+    ++gRequested;
+    if (pending) *pending = true;
+    return nullptr;
+}
+
+bool MSDFFont::RequestGeneration(uint32_t codepoint) {
+    if (!m_blob) {
+        if (!m_cache || !m_fontData || m_fontDataSize <= 0) return false;
+        std::weak_ptr<const FontBlob>& slot = s_blobs[m_cache->GetFontHash()];
+        m_blob = slot.lock();
+        if (!m_blob) {
+            auto blob = std::make_shared<FontBlob>();
+            blob->hash = m_cache->GetFontHash();
+            blob->bytes.assign(m_fontData, m_fontData + m_fontDataSize);
+            m_blob = std::move(blob);
+            slot = m_blob;
+        }
+    }
+    MSDFWorker::Request(m_blob, codepoint);
+    return true;
+}
+
+void MSDFFont::IntegrateGeneratedGlyphs() {
+    static std::vector<MSDFWorker::Result> results;
+    results.clear();
+    if (!MSDFWorker::Drain(results)) return;
+
+    for (MSDFWorker::Result& r : results) {
+        // No cache means every face of that file is gone - so is every string that
+        // wanted the glyph.
+        if (const std::shared_ptr<MSDFCache> cache = MSDFCache::Find(r.hash)) {
+            cache->StoreGlyph(std::move(r.glyph));
+        }
+    }
+    results.clear();
+    ++s_readyEpoch;
+}
+
+void MSDFFont::BuildGlyph(FT_Face face, msdfgen::FontHandle* handle, uint32_t codepoint, GlyphMetricsToStore& storage) {
     storage.codepoint = codepoint;
 
-    if (FT_Set_Pixel_Sizes(m_ftFace, MSDF::SDF_RENDER_SIZE, MSDF::SDF_RENDER_SIZE) != 0) {
+    if (FT_Set_Pixel_Sizes(face, MSDF::SDF_RENDER_SIZE, MSDF::SDF_RENDER_SIZE) != 0) {
         ++gNullPixelSize;
-        m_glyphPool.erase(it);
-        return nullptr;
+        return;
     }
 
-    FT_UInt glyphIndex = FT_Get_Char_Index(m_ftFace, codepoint);
-    if (FT_Load_Glyph(m_ftFace, glyphIndex, FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING) != 0) {
+    FT_UInt glyphIndex = FT_Get_Char_Index(face, codepoint);
+    if (FT_Load_Glyph(face, glyphIndex, FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING) != 0) {
         ++gNullLoadGlyph;
-        m_glyphPool.erase(it);
-        return nullptr;
+        return;
     }
 
-    storage.bitmapLeft = m_ftFace->glyph->bitmap_left;
-    storage.bitmapTop = m_ftFace->glyph->bitmap_top;
+    storage.bitmapLeft = face->glyph->bitmap_left;
+    storage.bitmapTop = face->glyph->bitmap_top;
 
-    const bool hasOutline = m_ftFace->glyph->format == FT_GLYPH_FORMAT_OUTLINE &&
-        m_ftFace->glyph->outline.n_contours > 0;
-    if (!hasOutline) ++gNoOutline;
-    if (hasOutline) {
-        FT_BBox bbox;
-        FT_Outline_Get_BBox(&m_ftFace->glyph->outline, &bbox);
-
-        uint16_t w = static_cast<uint16_t>(std::max(0, static_cast<int>(((bbox.xMax + 63) >> 6) - (bbox.xMin >> 6))));
-        uint16_t h = static_cast<uint16_t>(std::max(0, static_cast<int>(((bbox.yMax + 63) >> 6) - (bbox.yMin >> 6))));
-
-        if (w == 0 || h == 0) {
-            static int n = 0;
-            if (++n <= 10) Log("[MSDF] glyph code=%u has a ZERO bbox (w=%u h=%u) - it will stay empty", codepoint, w, h);
-        }
-        if (w > 0 && h > 0) {
-            uint16_t sdfW = w + 2 * MSDF::SDF_SPREAD;
-            uint16_t sdfH = h + 2 * MSDF::SDF_SPREAD;
-            storage.ownedPixelData.reserve(static_cast<size_t>(sdfW) * sdfH * 4);
-            const bool wygenerowano = GenerateMSDF(storage.ownedPixelData, codepoint, sdfW, sdfH);
-            if (!wygenerowano) {
-                // [1.12] A silent failure in the original: the block was skipped,
-                // the glyph kept a zero size and vanished without a trace in the log.
-                static int n = 0;
-                if (++n <= 10) Log("[MSDF] GenerateMSDF REFUSED for code=%u (sdf %ux%u)", codepoint, sdfW, sdfH);
-            }
-            if (wygenerowano) {
-                storage.width = sdfW;
-                storage.height = sdfH;
-                storage.dataSize = static_cast<uint32_t>(storage.ownedPixelData.size());
-                metrics.width = storage.width;
-                metrics.height = storage.height;
-                metrics.bitmapLeft = storage.bitmapLeft;
-                metrics.bitmapTop = storage.bitmapTop;
-                metrics.pixelData = storage.ownedPixelData.data();
-                // [1.12] as above - a failed upload must not be remembered
-                if (!UploadGlyphToAtlas(metrics, codepoint)) {
-                    ++gNullUploadGen;
-                    m_glyphPool.erase(codepoint);
-                    return nullptr;
-                }
-                ++gOkGen;
-            }
-        }
+    const bool hasOutline = face->glyph->format == FT_GLYPH_FORMAT_OUTLINE &&
+        face->glyph->outline.n_contours > 0;
+    if (!hasOutline) {
+        ++gNoOutline;
+        return;
     }
-    m_cache->StoreGlyph(std::move(storage));
 
-    return &metrics;
+    FT_BBox bbox;
+    FT_Outline_Get_BBox(&face->glyph->outline, &bbox);
+
+    uint16_t w = static_cast<uint16_t>(std::max(0, static_cast<int>(((bbox.xMax + 63) >> 6) - (bbox.xMin >> 6))));
+    uint16_t h = static_cast<uint16_t>(std::max(0, static_cast<int>(((bbox.yMax + 63) >> 6) - (bbox.yMin >> 6))));
+
+    if (w == 0 || h == 0) {
+        static std::atomic<int> n{ 0 };
+        if (++n <= 10) Log("[MSDF] glyph code=%u has a ZERO bbox (w=%u h=%u) - it will stay empty", codepoint, w, h);
+        return;
+    }
+
+    uint16_t sdfW = w + 2 * MSDF::SDF_SPREAD;
+    uint16_t sdfH = h + 2 * MSDF::SDF_SPREAD;
+    storage.ownedPixelData.reserve(static_cast<size_t>(sdfW) * sdfH * 4);
+    if (!GenerateMSDF(handle, storage.ownedPixelData, codepoint, sdfW, sdfH)) {
+        // [1.12] A silent failure in the original: the block was skipped,
+        // the glyph kept a zero size and vanished without a trace in the log.
+        static std::atomic<int> n{ 0 };
+        if (++n <= 10) Log("[MSDF] GenerateMSDF REFUSED for code=%u (sdf %ux%u)", codepoint, sdfW, sdfH);
+        storage.ownedPixelData.clear();
+        return;
+    }
+    storage.width = sdfW;
+    storage.height = sdfH;
+    storage.dataSize = static_cast<uint32_t>(storage.ownedPixelData.size());
+    ++gOkGen;
 }
 
 MSDFFont::AtlasPage* MSDFFont::GetAtlasPage(size_t index) {
@@ -469,10 +503,14 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
 }
 
 bool MSDFFont::GenerateMSDF(std::vector<uint8_t>& outData, uint32_t codepoint, int sdfW, int sdfH) const {
-    if (sdfW <= 0 || sdfH <= 0 || sdfW > 512 || sdfH > 512) return false;
+    return GenerateMSDF(m_msdfFont, outData, codepoint, sdfW, sdfH);
+}
+
+bool MSDFFont::GenerateMSDF(msdfgen::FontHandle* handle, std::vector<uint8_t>& outData, uint32_t codepoint, int sdfW, int sdfH) {
+    if (!handle || sdfW <= 0 || sdfH <= 0 || sdfW > 512 || sdfH > 512) return false;
 
     msdfgen::Shape shape;
-    if (!msdfgen::loadGlyph(shape, m_msdfFont, codepoint)) return false;
+    if (!msdfgen::loadGlyph(shape, handle, codepoint)) return false;
 
     if (shape.contours.empty()) {
         outData.assign(sdfW * sdfH * 4, 0);

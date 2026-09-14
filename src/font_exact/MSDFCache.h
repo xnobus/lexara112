@@ -4,6 +4,7 @@
 #include "ankerl/unordered_dense.h"
 #include <filesystem>
 #include <deque>
+#include <memory>
 
 class MSDFManager;
 class MSDFPregen;
@@ -32,7 +33,24 @@ public:
     MSDFCache(const FT_Byte* fontData, FT_Long dataSize,
         const char* familyName, const char* styleName,
         uint32_t sdfRenderSize, uint32_t sdfSpread);
+    MSDFCache(FontHash fontHash, const char* familyName, const char* styleName,
+        uint32_t sdfRenderSize, uint32_t sdfSpread);
     ~MSDFCache();
+
+    // [1.12] One cache per font FILE in the process, shared by every face opened on
+    // it - the client opens one face per size. Separate instances each kept their
+    // own manifest, so a glyph one size had generated stayed invisible to the others
+    // until the next session and was generated again for each of them.
+    static std::shared_ptr<MSDFCache> Acquire(const FT_Byte* fontData, FT_Long dataSize,
+        const char* familyName, const char* styleName, uint32_t sdfRenderSize, uint32_t sdfSpread);
+    static std::shared_ptr<MSDFCache> Find(FontHash fontHash);
+
+    // Writes out the glyphs of caches that have any waiting, at most `maxBlocks`
+    // block files per call. Rendering thread; meant for moments with no generation
+    // in progress, so the cost never lands on top of a burst.
+    static void FlushSome(size_t maxBlocks);
+
+    FontHash GetFontHash() const { return m_fontHash; }
 
     MSDFCache(const MSDFCache&) = delete;
     MSDFCache& operator=(const MSDFCache&) = delete;
@@ -44,7 +62,12 @@ private:
     static constexpr uint32_t CACHE_VERSION = 1;
     static constexpr uint32_t BLOCK_MAGIC = 0x4D534442;
     static constexpr uint32_t MANIFEST_MAGIC = 0x4D534D46;
-    static constexpr size_t WRITE_BATCH_SIZE = 64;
+    // [1.12] Pending glyphs used to be written every 64 - on the rendering thread,
+    // one full block-file rewrite per block touched, with an fsync each. They now
+    // wait for FlushSome at an idle moment; this is only the ceiling on the pixel
+    // data held meanwhile (~160 CJK or ~370 Latin glyphs), reached by a flood that
+    // never lets generation go idle.
+    static constexpr size_t MAX_PENDING_BYTES = 8 * 1024 * 1024;
     static constexpr size_t BLOCK_SIZE = 512;
     static constexpr size_t MAX_SAFE_ALLOCATION = 32 * 1024 * 1024;
 
@@ -118,7 +141,7 @@ private:
     void BuildBlockLockPath(uint32_t blockId, std::filesystem::path& outPath) const;
     void BuildBlockPath(uint32_t blockId, std::filesystem::path& outPath) const;
 
-    bool FlushPendingWrites();
+    bool FlushPendingWrites(size_t maxBlocks = SIZE_MAX);
     bool WriteBlockFile(uint32_t blockId, std::vector<GlyphMetricsToStore*>& pending, std::vector<ManifestEntry>& outEntries);
     void CleanupOrphans() const;
 
@@ -137,6 +160,7 @@ private:
 
     bool m_manifestLoaded = false;
     uint32_t m_fontID = 0xFFFFFFFF;
+    FontHash m_fontHash = 0;
 
     VectorPool<uint8_t> m_vecPool;
     VectorPool<uint32_t> m_hashPool;
@@ -144,7 +168,13 @@ private:
     VectorPool<ManifestEntry> m_mEntryPool;
 
     std::deque<GlyphMetricsToStore> m_pendingWrites;
-    
+    // [1.12] Codepoint -> its element in m_pendingWrites (deque elements do not move
+    // on push_back), so TryLoadGlyph serves a glyph before it reaches the disk.
+    ankerl::unordered_dense::map<uint32_t, const GlyphMetricsToStore*> m_pendingIndex;
+    size_t m_pendingBytes = 0;
+
+    inline static ankerl::unordered_dense::map<FontHash, std::weak_ptr<MSDFCache>> s_registry;
+
     ankerl::unordered_dense::map<uint32_t, BlockWrap> m_blockWrap;
 
     static MSDFManager s_manager;

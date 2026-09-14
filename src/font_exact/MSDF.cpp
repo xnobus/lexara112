@@ -150,7 +150,44 @@ namespace {
     constexpr uintptr_t bufalloc_3_site_jmpback = 0x005C913D;                                  // 006C4C4B
 
     bool s_msdfInitHookArmed = false;
-    std::vector<uint8_t> s_prefetchPayload;
+    std::vector<uint32_t> s_prefetchPayload;
+
+    // ------------------------------------------------------------------
+    // [1.12] The top byte of CGxString::m_flags is ours:
+    //   0x40 (0x40000000)  the client laid the string out again - InitializeTextLineHk
+    //                      raises it, ProcessGeometry rewrites the quads and drops it
+    //   0x80 | count&0x3F  quads written against that atlas eviction count
+    //   0x01               quads written while some glyphs were still being
+    //                      generated (those quads are hidden); g_pendingStrings holds
+    //                      the ready epoch they were written at
+    // The version used to be 0x80 | count&0x7F, which put bit 6 of the count on
+    // 0x40000000: for counts 64-127, 192-255... every string re-raised its own
+    // "rewrite me" flag, and ProcessGeometry walked it again on every frame.
+    // ------------------------------------------------------------------
+    constexpr uint32_t TOKEN_BUILT = 0x80;
+    constexpr uint32_t TOKEN_PENDING = 0x01;
+    constexpr uint32_t TOKEN_COUNT_MASK = 0x3F;
+
+    ankerl::unordered_dense::map<CGxString*, uint32_t> g_pendingStrings;
+    ULONGLONG g_lastGlyphsArrived = 0, g_lastIdleFlush = 0;
+
+    // [1.12] Render-thread hitch probe. The report that led here ("stutters on
+    // every chat message") came with a log without a single line about it, because
+    // nothing on the rendering thread measured itself.
+    double NowMs() {
+        static const double toMs = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return 1000.0 / static_cast<double>(f.QuadPart); }();
+        LARGE_INTEGER c;
+        QueryPerformanceCounter(&c);
+        return static_cast<double>(c.QuadPart) * toMs;
+    }
+
+    void ReportIfSlow(const char* what, double startMs, uint32_t detail = 0) {
+        const double ms = NowMs() - startMs;
+        if (ms < 8.0) return;
+        static int n = 0;
+        ++n;
+        if (n <= 30 || (n % 200) == 0) Log("[MSDF] slow %s: %.1f ms (detail=%u, #%d)", what, ms, detail, n);
+    }
 
     void __cdecl PrefetchCodepoints(CGxString* pThis) {
         if (s_prefetchPayload.empty()) return;
@@ -159,6 +196,8 @@ namespace {
         if (!D3D::GetDevice()) return;
         if (!pThis || reinterpret_cast<uintptr_t>(pThis) & 1) return;
 
+        const double start = NowMs();
+        const size_t count = s_prefetchPayload.size();
         if (MSDFFont* fontHandle = MSDFFont::Get(pThis->GetFontFace())) {
             std::ranges::sort(s_prefetchPayload);
             s_prefetchPayload.erase(std::ranges::unique(s_prefetchPayload).begin(), s_prefetchPayload.end());
@@ -167,6 +206,7 @@ namespace {
             }
         }
         s_prefetchPayload.clear();
+        ReportIfSlow("prefetch", start, static_cast<uint32_t>(count));
     }
 
     void __fastcall ProcessGeometry(CGxString* pThis) {
@@ -212,14 +252,26 @@ namespace {
         const double baselineOffs = (fontOffs > 0.0) ? 1.0 : 0.0;
         const double scale = (is3d ? fontSizeMult : CGxuFont::GetFontEffectiveHeight(is3d, fontSizeMult) * 0.98) / MSDF::SDF_RENDER_SIZE;
         const double pad = MSDF::SDF_SPREAD * scale;
+        const double start = NowMs();
+        bool anyPending = false;
 
         for (uint32_t q = 0; q < verts.m_count; q += 4) {
             CGxFontVertex* vBase = &verts.m_data[q];
             if (vBase[0].u > 1.0f) {
                 const uint32_t codepoint = vBase[0].u - 1.0f;
 
-                const GlyphMetrics* gm = fontHandle->GetGlyph(codepoint);
-                if (!gm) continue;
+                bool glyphPending = false;
+                const GlyphMetrics* gm = fontHandle->GetGlyph(codepoint, &glyphPending);
+                if (!gm) {
+                    // [1.12] Nothing to draw it with - still being generated, or
+                    // failed. The quad used to keep the codepoint in its UVs and the
+                    // shader sampled whatever sat at the edge of the atlas; collapse
+                    // it instead. u = 0 also keeps it out of a second pass.
+                    for (int i = 1; i < 4; ++i) vBase[i].pos = vBase[0].pos;
+                    for (int i = 0; i < 4; ++i) { vBase[i].u = 0.0f; vBase[i].v = 0.0f; }
+                    anyPending |= glyphPending;
+                    continue;
+                }
 
                 CGxGlyphCacheEntry* entry = fontObj->GetOrCreateGlyphEntry(codepoint);
                 if (!entry) continue;
@@ -264,20 +316,66 @@ namespace {
         }
         pThis->m_flags &= ~0x40000000;
 
-        uint32_t versionToken = (fontHandle->GetAtlasEvictionCount() & 0x7F) | 0x80;
-        pThis->m_flags = (pThis->m_flags & 0x00FFFFFF) | (versionToken << 24);
+        uint32_t token;
+        if (anyPending) {
+            // Strings destroyed while waiting leave their entry behind; a missing
+            // entry only means "rebuild", so the table can simply be dropped.
+            if (g_pendingStrings.size() > 4096) g_pendingStrings.clear();
+            g_pendingStrings[pThis] = MSDFFont::GetReadyEpoch();
+            token = TOKEN_PENDING;
+        }
+        else {
+            if (!g_pendingStrings.empty()) g_pendingStrings.erase(pThis);
+            token = TOKEN_BUILT | (fontHandle->GetAtlasEvictionCount() & TOKEN_COUNT_MASK);
+        }
+        pThis->m_flags = (pThis->m_flags & 0x00FFFFFF) | (token << 24);
+        ReportIfSlow("ProcessGeometry", start, verts.m_count / 4);
     }
 
     bool __fastcall CGxString__CheckGeometryHk(CGxString* pThis) {
+        // [1.12] Glyphs finished by the workers go into their caches first, so a
+        // string rebuilt below already finds them. Batched to one pass per 50 ms:
+        // every pass moves the epoch and rebuilds each waiting string, and a cold
+        // start delivers glyphs on nearly every frame.
+        if (MSDFWorker::HasResults()) {
+            const ULONGLONG now = GetTickCount64();
+            if (now - g_lastGlyphsArrived >= 50) {
+                const double start = NowMs();
+                MSDFFont::IntegrateGeneratedGlyphs();
+                g_lastGlyphsArrived = now;
+                ReportIfSlow("glyph integration", start);
+            }
+        }
+        else if (MSDFWorker::Idle()) {
+            // Generated glyphs are written to disk once generation has been quiet for
+            // a second - by then every string that waited for them has uploaded them -
+            // and a few block files at a time.
+            const ULONGLONG now = GetTickCount64();
+            if (now - g_lastGlyphsArrived > 1000 && now - g_lastIdleFlush > 250) {
+                g_lastIdleFlush = now;
+                const double start = NowMs();
+                MSDFCache::FlushSome(4);
+                ReportIfSlow("cache flush", start);
+            }
+        }
+
         if (MSDFFont* fontHandle = MSDFFont::Get(pThis->GetFontFace())) {
-            uint32_t highByte = (pThis->m_flags >> 24) & 0xFF;
-            if ((highByte & 0x80) != 0) {
-                uint8_t storedVersion = highByte & 0x7F;
-                uint8_t currentVersion = static_cast<uint8_t>(fontHandle->GetAtlasEvictionCount() & 0x7F);
-                if (storedVersion != currentVersion) {
-                    pThis->ClearInstanceData();
-                    pThis->m_flags &= 0x00FFFFFF;
-                }
+            const uint32_t highByte = (pThis->m_flags >> 24) & 0xFF;
+            bool rebuild = false;
+            if (highByte & TOKEN_BUILT) {
+                rebuild = (highByte & TOKEN_COUNT_MASK) != (fontHandle->GetAtlasEvictionCount() & TOKEN_COUNT_MASK);
+            }
+            else if (highByte == TOKEN_PENDING) {
+                // Rebuilt when glyphs arrived (or the atlas evicted) since the layout.
+                // When nothing is being generated any more the wait is over whatever
+                // the epoch says - that also covers an entry dropped from the table.
+                const auto it = g_pendingStrings.find(pThis);
+                rebuild = it == g_pendingStrings.end() || it->second != MSDFFont::GetReadyEpoch() || MSDFWorker::Idle();
+                if (rebuild && it != g_pendingStrings.end()) g_pendingStrings.erase(it);
+            }
+            if (rebuild) {
+                pThis->ClearInstanceData();
+                pThis->m_flags &= 0x00FFFFFF;
             }
         }
         CGxFontGeomBatch* batch = pThis->m_geomBuffers[0];
@@ -727,8 +825,18 @@ namespace {
         const int result = pThis->InitializeTextLine(text, textLength, a4, startPos, a6, a7);
 
         if (pThis->m_flags & 0x40000000) return result;
-        for (char* p = pThis->m_text; *p; ++p) {
-            s_prefetchPayload.push_back(static_cast<uint8_t>(*p));
+        // [1.12] Decoded as UTF-8. Bytes used to go in as codepoints, so every
+        // non-ASCII character also asked for 2-3 Latin-1 glyphs (lead and
+        // continuation bytes, 0x80-0xFF) that nothing draws - with synchronous
+        // generation that was up to ~10 ms each on the rendering thread.
+        for (const unsigned char* p = reinterpret_cast<const unsigned char*>(pThis->m_text); p && *p;) {
+            uint32_t codepoint = *p++;
+            const int extra = codepoint < 0x80 ? 0 : (codepoint >> 5) == 0x06 ? 1 : (codepoint >> 4) == 0x0E ? 2 : (codepoint >> 3) == 0x1E ? 3 : -1;
+            if (extra < 0) continue;
+            codepoint &= 0x7F >> extra;
+            int got = 0;
+            for (; got < extra && (*p & 0xC0) == 0x80; ++got, ++p) codepoint = (codepoint << 6) | (*p & 0x3F);
+            if (got == extra) s_prefetchPayload.push_back(codepoint);
         }
         pThis->m_flags |= 0x40000000;
         return result;

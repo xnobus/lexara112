@@ -28,14 +28,28 @@ void Log(const char* fmt, ...) {
     if (char* slash = strrchr(path, '\\')) *(slash + 1) = 0;
     strcat_s(path, "lexara112.log");
 
-    FILE* f = nullptr;
-    if (fopen_s(&f, path, "a") != 0 || !f) return;
+    // [1.12] Time and process on every line: two clients started from one directory
+    // write this file interleaved (seen in a report), and "it stutters when X
+    // happens" cannot be matched to anything without a clock. The line is built
+    // first and written in one call, because the glyph workers log too.
+    char line[1024];
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    int len = _snprintf_s(line, sizeof(line), _TRUNCATE, "%02u:%02u:%02u.%03u [%lu] ",
+        t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentProcessId());
+    if (len < 0) len = 0;
 
     va_list a;
     va_start(a, fmt);
-    vfprintf(f, fmt, a);
+    const int body = _vsnprintf_s(line + len, sizeof(line) - len - 1, _TRUNCATE, fmt, a);
     va_end(a);
-    fputc('\n', f);
+    len = body < 0 ? static_cast<int>(strlen(line)) : len + body;
+    line[len++] = '\n';
+    line[len] = 0;
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "a") != 0 || !f) return;
+    fputs(line, f);
     fclose(f);
 }
 

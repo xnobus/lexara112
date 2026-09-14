@@ -7,10 +7,14 @@ MSDFManager MSDFCache::s_manager = MSDFManager();
 
 MSDFCache::MSDFCache(const FT_Byte* fontData, FT_Long dataSize, const char* familyName, const char* styleName,
     uint32_t sdfRenderSize, uint32_t sdfSpread)
-    : m_key{ .sdfRenderSize = sdfRenderSize, .sdfSpread = sdfSpread }
+    : MSDFCache(HashFont(fontData, dataSize), familyName, styleName, sdfRenderSize, sdfSpread)
 {
-    const FontHash fontHash = HashFont(fontData, dataSize);
+}
 
+MSDFCache::MSDFCache(FontHash fontHash, const char* familyName, const char* styleName,
+    uint32_t sdfRenderSize, uint32_t sdfSpread)
+    : m_key{ .sdfRenderSize = sdfRenderSize, .sdfSpread = sdfSpread }, m_fontHash(fontHash)
+{
     m_cacheBasePath = GetCacheBasePath(familyName, styleName, fontHash, sdfRenderSize, sdfSpread);
     m_cacheManifestPath = m_cacheBasePath / "manifest.dat";
     m_cacheManifestLockPath = m_cacheBasePath / "manifest.lock";
@@ -28,6 +32,32 @@ MSDFCache::~MSDFCache() {
     MSDFManager::FlushAll();
     m_vecPool.TrimAll();
     m_mEntryPool.TrimAll();
+}
+
+std::shared_ptr<MSDFCache> MSDFCache::Acquire(const FT_Byte* fontData, FT_Long dataSize,
+    const char* familyName, const char* styleName, uint32_t sdfRenderSize, uint32_t sdfSpread) {
+    const FontHash fontHash = HashFont(fontData, dataSize);
+    std::weak_ptr<MSDFCache>& slot = s_registry[fontHash];
+    if (std::shared_ptr<MSDFCache> existing = slot.lock()) return existing;
+
+    auto cache = std::make_shared<MSDFCache>(fontHash, familyName, styleName, sdfRenderSize, sdfSpread);
+    slot = cache;
+    return cache;
+}
+
+std::shared_ptr<MSDFCache> MSDFCache::Find(FontHash fontHash) {
+    const auto it = s_registry.find(fontHash);
+    return it != s_registry.end() ? it->second.lock() : nullptr;
+}
+
+void MSDFCache::FlushSome(size_t maxBlocks) {
+    for (auto& [hash, weak] : s_registry) {
+        std::shared_ptr<MSDFCache> cache = weak.lock();
+        if (cache && !cache->m_pendingWrites.empty()) {
+            cache->FlushPendingWrites(maxBlocks);
+            return;
+        }
+    }
 }
 
 std::string MSDFCache::SanitizeName(std::string_view name) {
@@ -86,6 +116,18 @@ uint32_t MSDFCache::GetBlockId(uint32_t codepoint) {
 }
 
 bool MSDFCache::TryLoadGlyph(uint32_t codepoint, GlyphMetrics& outMetrics) {
+    // Generated but not written yet. The pointer is good until the next flush, and
+    // GetGlyph uploads the pixels before anything can flush.
+    if (const auto pit = m_pendingIndex.find(codepoint); pit != m_pendingIndex.end()) {
+        const GlyphMetricsToStore& p = *pit->second;
+        outMetrics.width = p.width;
+        outMetrics.height = p.height;
+        outMetrics.bitmapTop = p.bitmapTop;
+        outMetrics.bitmapLeft = p.bitmapLeft;
+        outMetrics.pixelData = (p.width && p.height && p.dataSize) ? p.ownedPixelData.data() : nullptr;
+        return true;
+    }
+
     auto mit = m_manifest.find(codepoint);
     if (mit == m_manifest.end()) return false;
     auto bit = m_blockWrap.find(mit->second.blockId);
@@ -105,8 +147,12 @@ bool MSDFCache::StoreGlyph(GlyphMetricsToStore&& metrics) {
     if (!m_manifestLoaded) {
         if (!LoadManifest()) return false;
     }
+    if (m_pendingIndex.contains(metrics.codepoint)) return true;
+
+    m_pendingBytes += metrics.ownedPixelData.size();
     m_pendingWrites.push_back(std::move(metrics));
-    if (m_pendingWrites.size() >= WRITE_BATCH_SIZE) {
+    m_pendingIndex[m_pendingWrites.back().codepoint] = &m_pendingWrites.back();
+    if (m_pendingBytes >= MAX_PENDING_BYTES) {
         FlushPendingWrites();
     }
     return true;
@@ -219,7 +265,11 @@ bool MSDFCache::AppendManifestJournal(const std::vector<ManifestEntry>& entries)
     DWORD written = 0;
     bool ok = WriteFile(file, buffer.data(), totalBytes, &written, nullptr) && (written == totalBytes);
     if (ok) {
-        FlushFileBuffers(file);
+        // [1.12] No FlushFileBuffers, here or in the two writes below. This is a
+        // cache on the rendering thread: an fsync roughly doubled the cost of every
+        // write (1 MiB 0.8 -> 1.5 ms, 10 MiB 3.0 -> 5.6 ms, measured), and what a
+        // crash can cost is a block or manifest that fails its header and size
+        // checks on load - which is then generated again.
         file.successful = true;
     }
 
@@ -259,7 +309,6 @@ bool MSDFCache::SaveManifest(bool isLocked) {
             return false;
         }
     }
-    FlushFileBuffers(file.handle);
     file.Close();
 
     if (MoveFileExW(tmpManifest.c_str(), m_cacheManifestPath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
@@ -277,7 +326,11 @@ size_t MSDFCache::GetManifestSize() {
     return m_manifest.size();
 }
 
-bool MSDFCache::FlushPendingWrites() {
+// [1.12] `maxBlocks` bounds how many block files one call rewrites, so FlushSome
+// can spread a large backlog over several frames. Glyphs whose block was not
+// written - over the limit, or its lock or write failed - stay pending and loadable
+// instead of being dropped as before.
+bool MSDFCache::FlushPendingWrites(size_t maxBlocks) {
     if (m_pendingWrites.empty()) return true;
 
     std::error_code ec;
@@ -295,7 +348,10 @@ bool MSDFCache::FlushPendingWrites() {
     );
     auto blockEntries = m_mEntryPool.Acquire(maxBlockSize);
 
+    ankerl::unordered_dense::set<uint32_t> writtenBlocks;
+    size_t attempted = 0;
     for (auto& kv : byBlock) {
+        if (attempted++ >= maxBlocks) break;
         uint32_t blockId = kv.first;
         std::filesystem::path lockPath;
         BuildBlockLockPath(blockId, lockPath);
@@ -307,8 +363,25 @@ bool MSDFCache::FlushPendingWrites() {
         if (!WriteBlockFile(blockId, kv.second, blockEntries)) continue;
 
         newEntries.insert(newEntries.end(), blockEntries.begin(), blockEntries.end());
+        writtenBlocks.insert(blockId);
     }
-    m_pendingWrites.clear();
+
+    if (writtenBlocks.size() == byBlock.size()) {
+        m_pendingWrites.clear();
+    }
+    else {
+        std::deque<GlyphMetricsToStore> keep;
+        for (auto& pw : m_pendingWrites) {
+            if (!writtenBlocks.contains(GetBlockId(pw.codepoint))) keep.push_back(std::move(pw));
+        }
+        m_pendingWrites.swap(keep);
+    }
+    m_pendingIndex.clear();
+    m_pendingBytes = 0;
+    for (const GlyphMetricsToStore& pw : m_pendingWrites) {
+        m_pendingIndex[pw.codepoint] = &pw;
+        m_pendingBytes += pw.ownedPixelData.size();
+    }
 
     if (!newEntries.empty()) {
         ScopedFileLock lock;
@@ -460,7 +533,6 @@ bool MSDFCache::WriteBlockFile(uint32_t blockId, std::vector<GlyphMetricsToStore
             static_cast<DWORD>(payloadBuffer.size()), &written, nullptr)) {
             return false;
         }
-        FlushFileBuffers(tmpFile.handle);
     }
 
     if (!MoveFileExW(tmpPath.c_str(), blockPath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
