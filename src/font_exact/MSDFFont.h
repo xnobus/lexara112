@@ -9,15 +9,40 @@ class MSDFFont {
     friend class MSDFPregen;
 
 private:
+    // [1.12] What identifies a cell in the shared atlas: the font FILE and the
+    // character - never the face. Every face the client opens on one file renders
+    // its glyphs through the same MSDFCache at the same fixed SDF_RENDER_SIZE, so
+    // the cell is byte for byte the same whatever size the face was opened at; the
+    // draw scales it (ProcessGeometry: `scale = effectiveHeight / SDF_RENDER_SIZE`).
+    // See the note on s_glyphPool.
+    struct GlyphKey {
+        FontHash hash = 0;
+        uint32_t codepoint = 0;
+        bool operator==(const GlyphKey& other) const {
+            return hash == other.hash && codepoint == other.codepoint;
+        }
+    };
+
+    struct GlyphKeyHash {
+        using is_avalanching = void;
+        uint64_t operator()(const GlyphKey& k) const noexcept {
+            // splitmix64 finaliser over the two fields, as in MSDFWorker
+            uint64_t x = k.hash ^ (static_cast<uint64_t>(k.codepoint) * 0x9E3779B97F4A7C15ULL);
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+            return x ^ (x >> 31);
+        }
+    };
+
     struct AtlasPage {
         IDirect3DTexture9* texture = nullptr;
         int nextX = 0, nextY = 0;
         int rowHeight = 0;
         int g = 0;
         // [1.12] A page is SHARED by every typeface, so a character code alone no
-        // longer identifies a glyph - we have to know whose it is in order to
-        // invalidate the entry in the right m_glyphPool on eviction.
-        std::vector<std::pair<MSDFFont*, uint32_t>> entries;
+        // longer identifies a glyph - we have to know which FILE it came from in
+        // order to invalidate the right entry of s_glyphPool on eviction.
+        std::vector<GlyphKey> entries;
 
         AtlasPage(int gutter) : nextX(gutter), nextY(gutter), g(gutter) {}
         ~AtlasPage() { 
@@ -70,8 +95,7 @@ public:
 private:
     static bool CreateAtlasPage();
     static int EvictOldestPage();
-    static void ForgetFontEntries(MSDFFont* font);
-    void InvalidateGlyph(uint32_t codepoint);
+    static void InvalidateGlyph(const GlyphKey& key);
     bool UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint);
     bool GenerateMSDF(std::vector<uint8_t>& outData, uint32_t codepoint, int sdfW, int sdfH) const;
     static bool GenerateMSDF(msdfgen::FontHandle* handle, std::vector<uint8_t>& outData, uint32_t codepoint, int sdfW, int sdfH);
@@ -91,19 +115,33 @@ private:
     FT_Long m_fontDataSize = 0;
     std::shared_ptr<const FontBlob> m_blob;
 
-    // [1.12] How many entries this typeface has in the shared atlas. Zero means
-    // there is no reason to touch the pages on destruction - and that is exactly
-    // what saves the pregen, which creates MSDFFont objects on worker threads and
-    // NEVER places anything in the atlas (it goes straight to GenerateMSDF).
-    // Without this guard their destructors would walk over state shared with the
-    // rendering thread.
-    size_t m_atlasEntryCount = 0;
-
     std::shared_ptr<MSDFCache> m_cache;
 
-    ankerl::unordered_dense::map<uint32_t, GlyphMetrics> m_glyphPool;
-
     inline static ankerl::unordered_dense::map<FT_Face, std::unique_ptr<MSDFFont>> s_fontHandles;
+
+    // [1.12] ONE glyph pool per process, keyed by (font file, codepoint) - it used
+    // to be a member, one pool per FACE.
+    //
+    // The client opens a face per size and recreates them in bursts: Jhinzuo's CJK
+    // session registered 23 distinct MSDFFont objects for the one 9 338 332-byte
+    // file. Each had its own pool, and a pool miss ends in UploadGlyphToAtlas, so
+    // every one of them cut its OWN cell for the same character out of the SHARED
+    // atlas - 23 identical 101x101 copies of every hanzi drawn.
+    //
+    // The whole atlas holds about 1 192 CJK cells (2048^2, four pages, gutter 14,
+    // measured on the font of issue #4), so that duplication left room for only a
+    // few dozen distinct characters before every new one evicted a page - and an
+    // eviction clears ~300 glyphs, memsets 16 MiB and rebuilds the geometry of
+    // EVERY string. That is the "serious lag" of issue #4: it needs a font with
+    // more characters than the atlas can hold divided by the number of open faces,
+    // i.e. a CJK font. Latin never noticed.
+    //
+    // Sharing is sound because the cell does not depend on the face: the pixels come
+    // from the one MSDFCache the file already shares between its faces, generated at
+    // the fixed SDF_RENDER_SIZE, and the metrics are scaled at draw time.
+    // It also removes the MSDFFont* that used to sit in AtlasPage::entries, so an
+    // eviction can no longer reach into a destroyed typeface.
+    inline static ankerl::unordered_dense::map<GlyphKey, GlyphMetrics, GlyphKeyHash> s_glyphPool;
 
     // [1.12] ONE atlas per process instead of one per typeface. Previously every
     // MSDFFont got its own 2048x2048 A8R8G8B8 pages in D3DPOOL_MANAGED, i.e. 16 MiB

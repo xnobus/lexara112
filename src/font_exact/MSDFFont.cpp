@@ -4,7 +4,6 @@
 #include "MSDFValidator.h"
 #include "MSDFUtils.h"
 #include <atomic>
-#include <ranges>
 
 MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize)
     : m_ftFace(face), m_msdfFont(nullptr), m_isValid(false), m_fontData(fontData), m_fontDataSize(dataSize)
@@ -20,7 +19,7 @@ MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize)
 
     m_isValid = m_cache->GetManifestSize() || MSDF::ALLOW_UNSAFE_FONTS ||
         MSDFValidator::IsFontMSDFCompatible(m_msdfFont, &m_rejectedCodepoint);
-    if (m_isValid) m_glyphPool.reserve(4096);
+    if (m_isValid && s_glyphPool.empty()) s_glyphPool.reserve(4096);
 }
 
 MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize, FT_Long)
@@ -28,14 +27,16 @@ MSDFFont::MSDFFont(FT_Face face, const FT_Byte* fontData, FT_Long dataSize, FT_L
 }
 
 MSDFFont::~MSDFFont() {
-    // [1.12] The pages are shared, so we do NOT release them HERE - that would
-    // take them away from typefaces that are still drawing. What we must do is
-    // sweep this typeface's entries out of them, because they hold `this` and an
-    // eviction would reach into a dead object.
-    // Guarded on the counter: a typeface that laid nothing out (every pregen
-    // MSDFFont) does not touch shared state at all.
-    if (m_atlasEntryCount) ForgetFontEntries(this);
-    m_glyphPool.clear();
+    // [1.12] The pages are shared, so we do NOT release them here - that would take
+    // them away from typefaces that are still drawing.
+    //
+    // Nor do we sweep anything out of them any more. The cells belong to the FILE
+    // (s_glyphPool is keyed by its hash), not to this face, and the client drops and
+    // recreates faces in bursts while it runs: a sweep would throw away cells the
+    // very next face is about to ask for again. Keeping them is what makes a face
+    // burst free - the recreated face finds the entries already in the pool and
+    // uploads nothing. There is also no `this` left in AtlasPage::entries for an
+    // eviction to reach into, which is what the old sweep was really protecting.
     m_cache.reset();
     if (m_msdfFont) {
         msdfgen::destroyFont(m_msdfFont);
@@ -82,12 +83,7 @@ void MSDFFont::Unregister(FT_Face face) {
 void MSDFFont::ClearAllCache() {
     // Called from D3D::RegisterOnDestroy - the device is going away, so the page
     // textures have to be let go, and every typeface loses its glyphs at once.
-    for (auto& handle : s_fontHandles | std::views::values) {
-        if (handle) {
-            handle->m_glyphPool.clear();
-            handle->m_atlasEntryCount = 0;
-        }
-    }
+    s_glyphPool.clear();
     s_atlasPages.clear();
     s_oldestPage = 0;
     ++s_evictionCount;
@@ -96,46 +92,25 @@ void MSDFFont::ClearAllCache() {
 
 void MSDFFont::Shutdown() {
     s_fontHandles.clear();
+    s_glyphPool.clear();
     s_atlasPages.clear();
 }
 
-// [1.12] Invalidation instead of removal. m_glyphPool is a dense map
+// [1.12] Invalidation instead of removal. s_glyphPool is a dense map
 // (unordered_dense) - erase moves other elements around in it, and
 // UploadGlyphToAtlas receives a `GlyphMetrics&` from that very map and holds that
 // reference across the whole eviction. Zeroing the UVs does not disturb the map's
 // layout, and GetGlyph already recognises an entry with a zero u1/v1 as "never
 // uploaded" and sends it to the atlas again - that retry path already exists and is
 // walked at every start-up, before the first frame.
-void MSDFFont::InvalidateGlyph(uint32_t codepoint) {
-    auto it = m_glyphPool.find(codepoint);
-    if (it == m_glyphPool.end()) return;
+void MSDFFont::InvalidateGlyph(const GlyphKey& key) {
+    auto it = s_glyphPool.find(key);
+    if (it == s_glyphPool.end()) return;
     it->second.u0 = 0.0f;
     it->second.v0 = 0.0f;
     it->second.u1 = 0.0f;
     it->second.v1 = 0.0f;
     it->second.atlasPageIndex = 0;
-}
-
-void MSDFFont::ForgetFontEntries(MSDFFont* font) {
-    for (auto& page : s_atlasPages) {
-        if (!page) continue;
-        std::erase_if(page->entries, [font](const auto& e) { return e.first == font; });
-        // [1.12] Sweeping the entries out was not enough: the shelf cursor
-        // (nextX/nextY/rowHeight) stayed where the dead typeface had left it, so the
-        // space was gone for the rest of the session. The client recreates its
-        // FT_Faces while it runs - issue #2's log shows the same face addresses
-        // coming back with different file sizes, and 16 `font registered` lines in a
-        // burst - and every such cycle re-uploaded the same glyphs into FRESH cells.
-        // That is what kept driving the atlas into eviction every few seconds.
-        //
-        // An empty `entries` means nothing alive points into this page: every
-        // successful upload records itself there, and eviction clears entries and
-        // cursor together. So the cursor can be rewound and the page reused, with no
-        // eviction, no full-page clear and no geometry rebuild. Stale pixels below
-        // the cursor are overwritten by whatever is laid out next - exactly as they
-        // are on a freshly created page, which is not cleared either.
-        if (page->entries.empty()) page->Clear();
-    }
 }
 
 // [1.12] Clears the oldest page and invalidates EVERY glyph sitting on it,
@@ -148,12 +123,7 @@ int MSDFFont::EvictOldestPage() {
 
     AtlasPage* page = s_atlasPages[s_oldestPage].get();
     const size_t dropped = page->entries.size();
-    for (const auto& [owner, cp] : page->entries) {
-        if (owner) {
-            owner->InvalidateGlyph(cp);
-            if (owner->m_atlasEntryCount) --owner->m_atlasEntryCount;
-        }
-    }
+    for (const GlyphKey& key : page->entries) InvalidateGlyph(key);
     page->Clear();
 
     if (page->texture) {
@@ -206,8 +176,9 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint, bool* pending) {
     // debugger, or after adding a call) - periodic logging cost more than it
     // measured: at 2.3 million calls per session it meant thousands of file opens.
     ++gTotal;
-    auto pit = m_glyphPool.find(codepoint);
-    if (pit != m_glyphPool.end()) {
+    const GlyphKey key{ m_cache->GetFontHash(), codepoint };
+    auto pit = s_glyphPool.find(key);
+    if (pit != s_glyphPool.end()) {
         // [1.12] An entry with zero UVs but a non-zero size is a glyph whose
         // upload to the atlas FAILED - usually because there was no D3D device yet
         // when it was generated (the prefetch runs from CheckGeometry, i.e. before
@@ -237,7 +208,7 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint, bool* pending) {
             // is safe despite the dense map: no reference into the pool is in
             // anyone's hands yet, ours or the caller's.
             if (!cached.pixelData) {
-                m_glyphPool.erase(pit);
+                s_glyphPool.erase(pit);
                 return GetGlyph(codepoint, pending);
             }
             if (!UploadGlyphToAtlas(cached, codepoint)) { ++gNullRetry; return nullptr; }
@@ -246,7 +217,7 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint, bool* pending) {
         return &cached;
     }
 
-    auto [it, inserted] = m_glyphPool.try_emplace(codepoint);
+    auto [it, inserted] = s_glyphPool.try_emplace(key);
     GlyphMetrics& metrics = it->second;
 
     if (m_cache->TryLoadGlyph(codepoint, metrics)) {
@@ -254,7 +225,7 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint, bool* pending) {
         // failed upload left an entry with zero UVs in the pool.
         if (!UploadGlyphToAtlas(metrics, codepoint)) {
             ++gNullUploadCache;
-            m_glyphPool.erase(it);
+            s_glyphPool.erase(it);
             return nullptr;
         }
         ++gOkCache;
@@ -265,7 +236,7 @@ const GlyphMetrics* MSDFFont::GetGlyph(uint32_t codepoint, bool* pending) {
     // IntegrateGeneratedGlyphs puts the result in the cache, and the string is laid
     // out again - then TryLoadGlyph above finds it. This used to be generated right
     // here, on the client's rendering thread.
-    m_glyphPool.erase(it);
+    s_glyphPool.erase(it);
     if (!RequestGeneration(codepoint)) return nullptr;
     ++gRequested;
     if (pending) *pending = true;
@@ -506,8 +477,7 @@ bool MSDFFont::UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint) {
 
     targetPage->nextX += metrics.width + MSDF::ATLAS_GUTTER;
     targetPage->rowHeight = std::max(targetPage->rowHeight, static_cast<int>(metrics.height));
-    targetPage->entries.emplace_back(this, codepoint);
-    ++m_atlasEntryCount;
+    targetPage->entries.push_back(GlyphKey{ m_cache->GetFontHash(), codepoint });
 
     // [1.12] The pixels are in the atlas now, and this pointer survives at most
     // until the next cache flush. We null it so that a stale read is impossible by
