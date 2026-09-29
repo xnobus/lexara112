@@ -71,6 +71,8 @@ private:
     static constexpr uint32_t GENERATOR_REVISION = 2;
     static constexpr uint32_t BLOCK_MAGIC = 0x4D534442;
     static constexpr uint32_t MANIFEST_MAGIC = 0x4D534D46;
+    static constexpr uint32_t GENERATOR_SDF = 0x31464453;   // "SDF1"
+    static constexpr uint32_t GENERATOR_MSDF = 0x4644534D;  // "MSDF"
     // [1.12] Pending glyphs used to be written every 64 - on the rendering thread,
     // one full block-file rewrite per block touched, with an fsync each. They now
     // wait for FlushSome at an idle moment; this is only the level (~160 CJK or ~370
@@ -123,6 +125,10 @@ private:
         FT_Int bitmapLeft;
         uint32_t dataOffset;
         uint32_t dataSize;
+        // [1.12] GENERATOR_SDF or GENERATOR_MSDF. Earlier builds drew every glyph as an
+        // MSDF and left this word as uninitialised padding, so only GENERATOR_SDF is
+        // read as a statement - anything else is an MSDF. Their folders stay valid.
+        uint32_t generator;
 
         bool operator<(const GlyphEntry& other) const {
             return codepoint < other.codepoint;
@@ -179,7 +185,7 @@ private:
     std::deque<GlyphMetricsToStore> m_pendingWrites;
     // [1.12] Codepoint -> its element in m_pendingWrites (deque elements do not move
     // on push_back), so TryLoadGlyph serves a glyph before it reaches the disk.
-    ankerl::unordered_dense::map<uint32_t, const GlyphMetricsToStore*> m_pendingIndex;
+    ankerl::unordered_dense::map<uint32_t, GlyphMetricsToStore*> m_pendingIndex;
     size_t m_pendingBytes = 0;
 
     inline static ankerl::unordered_dense::map<FontHash, std::weak_ptr<MSDFCache>> s_registry;

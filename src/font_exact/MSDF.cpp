@@ -323,6 +323,19 @@ namespace {
             }
         }
 
+        // [1.12] Glyphs are made as plain SDFs, which match an MSDF up to the cell's own
+        // resolution and round sharp corners beyond it. A string drawn that large asks
+        // for MSDFs of its glyphs; each replaces its SDF in place when it arrives. 3D
+        // text is left out - its size on screen is not known here.
+        if (!is3d && scale > MSDF::MSDF_ABOVE_SCALE) {
+            for (uint32_t q = 0; q < quadCount; ++q) {
+                const QuadGlyph& glyph = g_quadGlyphs[q];
+                if (glyph.state == QuadGlyph::State::Drawn && !glyph.metrics.msdf && glyph.metrics.width > 0) {
+                    fontHandle->RequestRefinement(glyph.codepoint);
+                }
+            }
+        }
+
         for (uint32_t q = 0; q < quadCount; ++q) {
             const QuadGlyph& glyph = g_quadGlyphs[q];
             CGxFontVertex* vBase = &verts.m_data[q * 4];

@@ -220,18 +220,22 @@ bool MSDFPregen::GenerateFont(const PreGenRequest& req) {
     const unsigned int numThreads = hw;
 
     std::vector<FT_Face> threadFaces(numThreads, nullptr);
-    FT_Library ftLib = nullptr;
-
-    if (FT_Init_FreeType(&ftLib) != 0 || !ftLib) {
-        printf("ERROR: %s\n", "FT_Init_FreeType failed");
-        return false;
-    }
+    // [1.12] A library per thread, as the glyph workers have: GenerateSDF rasterises
+    // through the face's library, and FreeType does not promise that is safe on one
+    // library from several threads.
+    std::vector<FT_Library> threadLibs(numThreads, nullptr);
 
     bool allHandlesValid = true;
     for (unsigned int i = 0; i < numThreads; ++i) {
-        if (FT_New_Memory_Face(ftLib, req.data, req.size, req.faceIndex, &threadFaces[i]) != 0) {
-            const char* name = threadFaces[i] ? threadFaces[i]->family_name : nullptr;
-            printf("ERROR: FT_New_Memory_Face failed for %s\n", name ? name : "unknown font");
+        if (FT_Init_FreeType(&threadLibs[i]) != 0) {
+            threadLibs[i] = nullptr;
+            printf("ERROR: %s\n", "FT_Init_FreeType failed");
+            allHandlesValid = false;
+            break;
+        }
+        if (FT_New_Memory_Face(threadLibs[i], req.data, req.size, req.faceIndex, &threadFaces[i]) != 0) {
+            threadFaces[i] = nullptr;
+            printf("ERROR: FT_New_Memory_Face failed for %s\n", req.familyName.c_str());
             allHandlesValid = false;
             break;
         }
@@ -248,8 +252,8 @@ bool MSDFPregen::GenerateFont(const PreGenRequest& req) {
         for (unsigned int i = 0; i < numThreads; ++i) {
             threadMSDFFonts[i].reset();
             if (threadFaces[i]) FT_Done_Face(threadFaces[i]);
+            if (threadLibs[i]) FT_Done_FreeType(threadLibs[i]);
         }
-        if (ftLib) FT_Done_FreeType(ftLib);
         printf("ERROR: %s\n", "Failed to create MSDFFont instances");
         return false;
     }
@@ -278,15 +282,8 @@ bool MSDFPregen::GenerateFont(const PreGenRequest& req) {
             printf("ERROR: Invalid handles in worker %u\n", workerId);
             return;
         }
-        if (FT_Set_Pixel_Sizes(localFace, MSDF::SDF_RENDER_SIZE, MSDF::SDF_RENDER_SIZE) != 0) {
-            workerError.store(true, std::memory_order_release);
-            printf("ERROR: FT_Set_Pixel_Sizes failed in worker %u\n", workerId);
-            return;
-        }
 
         Throttle throttle(cpuLimit);
-        VectorPool<uint8_t> pool;
-        auto msdfData = pool.Acquire(512 * 512 * 4);
 
         while (true) {
             if (workerError.load(std::memory_order_acquire)) break;
@@ -294,64 +291,13 @@ bool MSDFPregen::GenerateFont(const PreGenRequest& req) {
             uint32_t cp = nextCp.fetch_add(1, std::memory_order_acq_rel);
             if (cp > end) break;
 
+            // [1.12] The glyph workers' own path, so a pregenerated glyph is the one the
+            // game would have made: an SDF (MSDFFont::GenerateSDF), an MSDF only when
+            // the SDF fails. This used to duplicate the old inline MSDF code.
             throttle.StartWork();
-
-            if (FT_Load_Glyph(localFace, FT_Get_Char_Index(localFace, cp),
-                FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING) != 0) {
-                doneCount.fetch_add(1, std::memory_order_relaxed);
-                throttle.EndWork();
-                continue;
-            }
-
-            const bool hasOutline = localFace->glyph->format == FT_GLYPH_FORMAT_OUTLINE &&
-                localFace->glyph->outline.n_contours > 0;
-
-            uint16_t width = 0;
-            uint16_t height = 0;
-            int16_t bitmapLeft = static_cast<int16_t>(localFace->glyph->bitmap_left);
-            int16_t bitmapTop = static_cast<int16_t>(localFace->glyph->bitmap_top);
-
-            if (hasOutline) {
-                FT_BBox bbox;
-                FT_Outline_Get_BBox(&localFace->glyph->outline, &bbox);
-
-                int xMin = bbox.xMin >> 6;
-                int yMin = bbox.yMin >> 6;
-                int xMax = (bbox.xMax + 63) >> 6;
-                int yMax = (bbox.yMax + 63) >> 6;
-                int w = std::max(0, xMax - xMin);
-                int h = std::max(0, yMax - yMin);
-
-                if (w > 0 && h > 0) {
-                    int sdfW = w + 2 * MSDF::SDF_SPREAD;
-                    int sdfH = h + 2 * MSDF::SDF_SPREAD;
-
-                    if (sdfW > 0 && sdfH > 0 && sdfW <= 512 && sdfH <= 512) {
-                        msdfData.clear();
-                        if (font->GenerateMSDF(msdfData, cp, sdfW, sdfH)) {
-                            size_t expectedSize = static_cast<size_t>(sdfW) * sdfH * 4;
-                            if (msdfData.size() == expectedSize) {
-                                width = static_cast<uint16_t>(sdfW);
-                                height = static_cast<uint16_t>(sdfH);
-                            }
-                            else {
-                                printf("WARNING: Glyph U+%04X size mismatch: got %zu, expected %zu\n",
-                                    cp, msdfData.size(), expectedSize);
-                            }
-                        }
-                    }
-                }
-            }
+            GlyphMetricsToStore gm;
+            MSDFFont::BuildGlyph(localFace, font->m_msdfFont, cp, gm, false);
             throttle.EndWork();
-
-            GlyphMetricsToStore gm = {};
-            gm.codepoint = cp;
-            gm.width = width;
-            gm.height = height;
-            gm.bitmapLeft = bitmapLeft;
-            gm.bitmapTop = bitmapTop;
-            gm.ownedPixelData.assign(msdfData.begin(), msdfData.end());
-            gm.dataSize = static_cast<uint32_t>(gm.ownedPixelData.size());
 
             {
                 std::lock_guard<std::mutex> lock(cacheMutex);
@@ -361,7 +307,6 @@ bool MSDFPregen::GenerateFont(const PreGenRequest& req) {
             }
             doneCount.fetch_add(1, std::memory_order_relaxed);
         }
-        pool.Release(std::move(msdfData));
         };
 
     std::vector<std::thread> threads;
@@ -383,10 +328,10 @@ bool MSDFPregen::GenerateFont(const PreGenRequest& req) {
     printf(" Done.\n");
 
     threadMSDFFonts.clear();
-    for (auto face : threadFaces) {
-        if (face) FT_Done_Face(face);
+    for (unsigned int i = 0; i < numThreads; ++i) {
+        if (threadFaces[i]) FT_Done_Face(threadFaces[i]);
+        if (threadLibs[i]) FT_Done_FreeType(threadLibs[i]);
     }
-    if (ftLib) FT_Done_FreeType(ftLib);
 
     bool success = !workerError.load(std::memory_order_acquire);
     if (!success) {

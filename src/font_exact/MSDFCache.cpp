@@ -126,6 +126,7 @@ bool MSDFCache::TryLoadGlyph(uint32_t codepoint, GlyphMetrics& outMetrics) {
         outMetrics.height = p.height;
         outMetrics.bitmapTop = p.bitmapTop;
         outMetrics.bitmapLeft = p.bitmapLeft;
+        outMetrics.msdf = p.msdf;
         outMetrics.pixelData = (p.width && p.height && p.dataSize) ? p.ownedPixelData.data() : nullptr;
         return true;
     }
@@ -149,7 +150,15 @@ bool MSDFCache::StoreGlyph(GlyphMetricsToStore&& metrics) {
     if (!m_manifestLoaded) {
         if (!LoadManifest()) return false;
     }
-    if (m_pendingIndex.contains(metrics.codepoint)) return true;
+    if (const auto pit = m_pendingIndex.find(metrics.codepoint); pit != m_pendingIndex.end()) {
+        // An MSDF refinement of a glyph still waiting as an SDF takes its place.
+        GlyphMetricsToStore& waiting = *pit->second;
+        if (!metrics.msdf || waiting.msdf) return true;
+        m_pendingBytes -= waiting.ownedPixelData.size();
+        m_pendingBytes += metrics.ownedPixelData.size();
+        waiting = std::move(metrics);
+        return true;
+    }
 
     m_pendingBytes += metrics.ownedPixelData.size();
     m_pendingWrites.push_back(std::move(metrics));
@@ -402,7 +411,7 @@ bool MSDFCache::FlushPendingWrites(size_t maxBlocks) {
     }
     m_pendingIndex.clear();
     m_pendingBytes = 0;
-    for (const GlyphMetricsToStore& pw : m_pendingWrites) {
+    for (GlyphMetricsToStore& pw : m_pendingWrites) {
         m_pendingIndex[pw.codepoint] = &pw;
         m_pendingBytes += pw.ownedPixelData.size();
     }
@@ -468,9 +477,12 @@ bool MSDFCache::WriteBlockFile(uint32_t blockId, std::vector<GlyphMetricsToStore
             	.bitmapTop = p->bitmapTop,
             	.bitmapLeft = p->bitmapLeft,
             	.dataOffset = 0,
-            	.dataSize = p->dataSize });
+            	.dataSize = p->dataSize,
+                .generator = p->msdf ? GENERATOR_MSDF : GENERATOR_SDF });
         }
         else {
+            // Already in the block: an SDF this pending MSDF refines, or a glyph
+            // another client wrote meanwhile.
             auto* p = *pendingIt++;
             mergedEntries.push_back({
                 .codepoint = p->codepoint,
@@ -479,7 +491,8 @@ bool MSDFCache::WriteBlockFile(uint32_t blockId, std::vector<GlyphMetricsToStore
                 .bitmapTop = p->bitmapTop,
                 .bitmapLeft = p->bitmapLeft,
                 .dataOffset = 0,
-                .dataSize = p->dataSize });
+                .dataSize = p->dataSize,
+                .generator = p->msdf ? GENERATOR_MSDF : GENERATOR_SDF });
             oldIdx++;
         }
     }

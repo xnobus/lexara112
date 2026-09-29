@@ -29,13 +29,25 @@ namespace {
     struct Job {
         std::shared_ptr<const FontBlob> font;
         uint32_t codepoint = 0;
+        bool refine = false;
     };
+
+    // Codepoints end at 0x10FFFF, so the top bit is free to tell a refinement apart.
+    constexpr uint32_t REFINE_BIT = 0x80000000u;
+
+    GlyphKey KeyOf(FontHash hash, uint32_t codepoint, bool refine) {
+        return { hash, codepoint | (refine ? REFINE_BIT : 0u) };
+    }
 
     struct State {
         std::mutex mutex;
         std::condition_variable wake;
-        std::deque<Job> queue;
-        ankerl::unordered_dense::set<GlyphKey, GlyphKeyHash> inFlight;  // queued or being generated
+        std::deque<Job> queue;         // SDF glyphs - what a hidden quad is waiting for
+        std::deque<Job> refineQueue;   // MSDF refinements, taken only when `queue` is empty
+        // Queued, being generated, or finished and not drained yet. It used to be
+        // cleared when a worker finished, and a string laid out again before the
+        // rendering thread drained the result asked for the glyph a second time.
+        ankerl::unordered_dense::set<GlyphKey, GlyphKeyHash> inFlight;
         std::vector<MSDFWorker::Result> done;
         std::atomic<uint32_t> outstanding{ 0 };                           // requested and not yet drained
         std::atomic<bool> hasResults{ false };
@@ -82,7 +94,7 @@ namespace {
             Job job;
             {
                 std::unique_lock lock(s.mutex);
-                if (s.queue.empty()) {
+                if (s.queue.empty() && s.refineQueue.empty()) {
                     // Idle: drop the faces of files nobody but this worker keeps alive.
                     lock.unlock();
                     for (auto it = loaded.begin(); it != loaded.end();) {
@@ -90,10 +102,11 @@ namespace {
                         else ++it;
                     }
                     lock.lock();
-                    s.wake.wait(lock, [&s] { return !s.queue.empty(); });
+                    s.wake.wait(lock, [&s] { return !s.queue.empty() || !s.refineQueue.empty(); });
                 }
-                job = std::move(s.queue.front());
-                s.queue.pop_front();
+                std::deque<Job>& from = !s.queue.empty() ? s.queue : s.refineQueue;
+                job = std::move(from.front());
+                from.pop_front();
             }
 
             LoadedFont* font = nullptr;
@@ -120,17 +133,17 @@ namespace {
 
             MSDFWorker::Result result;
             result.hash = job.font->hash;
+            result.refine = job.refine;
             result.glyph.codepoint = job.codepoint;
             // An empty result is still a result: it is cached as an empty glyph, so
             // a glyph that cannot be made is not asked for again and again.
             if (font->face && font->handle) {
-                MSDFFont::BuildGlyph(font->face, font->handle, job.codepoint, result.glyph);
+                MSDFFont::BuildGlyph(font->face, font->handle, job.codepoint, result.glyph, job.refine);
             }
             job.font.reset();
 
             {
                 std::lock_guard lock(s.mutex);
-                s.inFlight.erase(GlyphKey{ result.hash, result.glyph.codepoint });
                 s.done.push_back(std::move(result));
                 s.hasResults.store(true, std::memory_order_relaxed);
             }
@@ -142,21 +155,21 @@ namespace {
         // Below normal priority, and half the hardware threads minus two for the
         // client's own thread, DXVK's and the driver's: 8 threads -> 2 workers,
         // 12 -> 4, 16 and up -> 6. Until a worker finishes it a glyph is not drawn at
-        // all, and a CJK one takes ~52 ms; hw / 4 capped at three gave the CJK
-        // reporter's 16-thread machine three workers for a chat full of new hanzi.
+        // all; hw / 4 capped at three gave the CJK reporter's 16-thread machine three
+        // workers for a chat full of new hanzi, back when each took ~52 ms as an MSDF.
         const unsigned count = std::clamp(hw > 4 ? hw / 2 - 2 : 1u, 1u, 6u);
         for (unsigned i = 0; i < count; ++i) std::thread(WorkerMain).detach();
         Log("[MSDF] glyph workers started: %u (hardware threads %u)", count, hw);
     }
 }
 
-void MSDFWorker::Request(const std::shared_ptr<const FontBlob>& font, uint32_t codepoint) {
+void MSDFWorker::Request(const std::shared_ptr<const FontBlob>& font, uint32_t codepoint, bool refine) {
     if (!font) return;
     State& s = S();
     {
         std::lock_guard lock(s.mutex);
-        if (!s.inFlight.emplace(GlyphKey{ font->hash, codepoint }).second) return;
-        s.queue.push_back({ font, codepoint });
+        if (!s.inFlight.emplace(KeyOf(font->hash, codepoint, refine)).second) return;
+        (refine ? s.refineQueue : s.queue).push_back({ font, codepoint, refine });
         s.outstanding.fetch_add(1, std::memory_order_relaxed);
         if (!s.started) {
             s.started = true;
@@ -173,6 +186,7 @@ bool MSDFWorker::Drain(std::vector<Result>& out) {
         std::lock_guard lock(s.mutex);
         out.swap(s.done);
         s.hasResults.store(false, std::memory_order_relaxed);
+        for (const Result& r : out) s.inFlight.erase(KeyOf(r.hash, r.glyph.codepoint, r.refine));
     }
     s.outstanding.fetch_sub(static_cast<uint32_t>(out.size()), std::memory_order_relaxed);
     return !out.empty();

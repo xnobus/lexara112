@@ -13,6 +13,10 @@
 // with characters the cache had not seen froze the game for tens to hundreds of
 // milliseconds. The client now gets nothing for such a glyph until a worker has
 // made it (the quad is hidden and the string is laid out again afterwards).
+//
+// A glyph is first made as a plain SDF (MSDFFont::GenerateSDF, ~0.3 ms for CJK), so
+// that wait is a frame or two. An MSDF is made only as a refinement, for a glyph
+// drawn magnified (MSDF_ABOVE_SCALE), and only once no SDF job is waiting.
 
 // Font bytes owned by Lexara. A job can outlive the client's FT_Face - the client
 // recreates its faces in bursts - and the buffer the client handed to
@@ -25,12 +29,15 @@ struct FontBlob {
 namespace MSDFWorker {
     struct Result {
         FontHash hash = 0;
+        // Answers a refinement request - the glyph is already drawn from an SDF.
+        bool refine = false;
         GlyphMetricsToStore glyph;
     };
 
     // Rendering thread only. Queues the glyph unless the same codepoint of the same
-    // file is already queued or being generated.
-    void Request(const std::shared_ptr<const FontBlob>& font, uint32_t codepoint);
+    // file is already queued, being generated or waiting to be drained. `refine`
+    // asks for an MSDF instead of an SDF.
+    void Request(const std::shared_ptr<const FontBlob>& font, uint32_t codepoint, bool refine = false);
 
     // Rendering thread only. Moves every finished glyph into `out` (which must be
     // empty); returns false when there was none.

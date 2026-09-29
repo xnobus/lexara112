@@ -76,9 +76,15 @@ public:
     // again once GetReadyEpoch() moves.
     const GlyphMetrics* GetGlyph(uint32_t codepoint, bool* pending = nullptr);
 
+    // Asks for an MSDF of a glyph that is drawn from an SDF (GlyphMetrics::msdf is
+    // false). It replaces the SDF in its atlas cell when it arrives - same size, same
+    // UVs, so no string is laid out again.
+    void RequestRefinement(uint32_t codepoint);
+
     // Worker thread: everything GetGlyph used to do inline for a glyph the cache did
-    // not have. `face` and `handle` belong to the calling thread.
-    static void BuildGlyph(FT_Face face, msdfgen::FontHandle* handle, uint32_t codepoint, GlyphMetricsToStore& out);
+    // not have - an SDF, or an MSDF when `msdf` is set. `face` and `handle` belong to
+    // the calling thread.
+    static void BuildGlyph(FT_Face face, msdfgen::FontHandle* handle, uint32_t codepoint, GlyphMetricsToStore& out, bool msdf);
 
     // Rendering thread: hands finished glyphs to their caches and moves the epoch.
     static void IntegrateGeneratedGlyphs();
@@ -97,9 +103,11 @@ private:
     static int EvictOldestPage();
     static void InvalidateGlyph(const GlyphKey& key);
     bool UploadGlyphToAtlas(GlyphMetrics& metrics, uint32_t codepoint);
-    bool GenerateMSDF(std::vector<uint8_t>& outData, uint32_t codepoint, int sdfW, int sdfH) const;
+    static bool ReplaceAtlasCell(const GlyphMetrics& cell, const uint8_t* pixels);
+    static void ApplyRefinement(FontHash hash, GlyphMetricsToStore& glyph);
     static bool GenerateMSDF(msdfgen::FontHandle* handle, std::vector<uint8_t>& outData, uint32_t codepoint, int sdfW, int sdfH);
-    bool RequestGeneration(uint32_t codepoint);
+    static bool GenerateSDF(FT_GlyphSlot slot, std::vector<uint8_t>& outData, int sdfW, int sdfH);
+    bool RequestGeneration(uint32_t codepoint, bool refine = false);
 
     static msdfgen::FontHandle* CreateMSDFHandle(const FT_Byte* data, FT_Long size);
 
@@ -163,6 +171,10 @@ private:
 
     // One copy of a file's bytes however many faces are open on it.
     inline static ankerl::unordered_dense::map<FontHash, std::weak_ptr<const FontBlob>> s_blobs;
+
+    // Glyphs GenerateMSDF could not make this session - they stay SDFs, and are not
+    // asked for again every time a string shows them magnified.
+    inline static ankerl::unordered_dense::set<GlyphKey, GlyphKeyHash> s_refineFailed;
 
     inline static thread_local VectorPool<float> m_msdfPool;
 };

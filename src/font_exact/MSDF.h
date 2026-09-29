@@ -17,6 +17,9 @@ struct GlyphMetrics {
 	FT_Int bitmapLeft = 0;
     float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
     uint16_t atlasPageIndex = 0;
+    // [1.12] The pixels came from GenerateMSDF, not GenerateSDF - nothing left to
+    // refine (MSDFFont::RequestRefinement).
+    bool msdf = false;
     const uint8_t* pixelData = nullptr;
 };
 
@@ -26,6 +29,7 @@ struct GlyphMetricsToStore {
     uint16_t height = 0;
     FT_Int bitmapTop = 0;
 	FT_Int bitmapLeft = 0;
+    bool msdf = false;
     std::vector<uint8_t> ownedPixelData;
     uint32_t dataSize = 0;
 };
@@ -73,6 +77,12 @@ namespace MSDF {
 
     inline constexpr uint32_t MAX_ATLAS_PAGES = 4;
     inline constexpr size_t CJK_CACHE_THRESHOLD = 16661;
+
+    // [1.12] A glyph is drawn from a plain SDF (MSDFFont::GenerateSDF) until a string
+    // shows it magnified past this factor of SDF_RENDER_SIZE; then it is regenerated
+    // as an MSDF. Up to 1x the two are about as faithful, above ~1.5x the SDF rounds
+    // sharp corners - measured in docs/cjk-atlas-duplication.md.
+    inline constexpr double MSDF_ABOVE_SCALE = 1.0;
 
 	// [1.12] The renderer switch, flipped with the CTRL+ALT+F shortcut (handled in
 	// D3D.cpp, inside the EndScene hook). It exists for before/after comparisons.
