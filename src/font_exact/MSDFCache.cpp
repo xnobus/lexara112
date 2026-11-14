@@ -455,11 +455,20 @@ bool MSDFCache::WriteBlockFile(uint32_t blockId, std::vector<GlyphMetricsToStore
     auto mergedEntries = m_gEntryPool.Acquire(oldEntriesCount + pending.size());
     auto hashTable = m_hashPool.AcquireSized(BLOCK_SIZE, 0xFFFFFFFF);
 
-    std::vector<uint8_t>* payloadRef = nullptr;
+    // [1.12] Declared here, BEFORE `cleanup`, so it is still alive when cleanup
+    // hands it back to the pool. It used to be declared further down and reached
+    // through a pointer - and locals die in reverse order, so the vector was
+    // destroyed (its buffer freed) first and cleanup then read the dead object.
+    // The optimizer may drop a dying vector's pointer-nulling stores, and then the
+    // freed buffer went back into m_vecPool: the next block rewrite took it out and
+    // its memset wrote into freed memory (issue #5: ACCESS_VIOLATION in memset
+    // under FlushPendingWrites -> WriteBlockFile, the second time a block grew in
+    // one session - typing at the login screen was enough).
+    std::vector<uint8_t> payloadBuffer;
     FinalAction cleanup([&]() {
         if (!hashTable.empty()) m_hashPool.Release(std::move(hashTable));
         if (!mergedEntries.empty()) m_gEntryPool.Release(std::move(mergedEntries));
-        if (payloadRef && !payloadRef->empty()) m_vecPool.Release(std::move(*payloadRef));
+        if (!payloadBuffer.empty()) m_vecPool.Release(std::move(payloadBuffer));
         });
 
     uint32_t oldIdx = 0;
@@ -508,8 +517,7 @@ bool MSDFCache::WriteBlockFile(uint32_t blockId, std::vector<GlyphMetricsToStore
         hashTable[mergedEntries[i].codepoint & (BLOCK_SIZE - 1)] = static_cast<uint32_t>(i);
     }
 
-    auto payloadBuffer = m_vecPool.AcquireSized(totalPayloadSize);
-    payloadRef = &payloadBuffer;
+    payloadBuffer = m_vecPool.AcquireSized(totalPayloadSize);
 
     auto pendingCopyIt = pending.begin();
     for (auto& ge : mergedEntries) {
