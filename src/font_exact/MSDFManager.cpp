@@ -133,11 +133,22 @@ void MSDFManager::FreeBlock(uint32_t blockIndex) {
 
     MappedBlock& block = s_mappedBlocks[blockIndex];
     MSDFCache::BlockKey keyToErase = block.key;
+    const uint32_t slotIndex = block.slotIndex;
 
-    if (block.slotIndex != 0xFFFFFFFF) {
-        s_arena.FreeSlot(block.slotIndex);
-    }
+    // [1.12] The view is unmapped HERE, once, through its guard - and only then is
+    // the slot released. It used to be the other way round: FreeSlot unmapped the
+    // view, and Reset() then unmapped the same, already-gone address a second time.
+    // On Windows that second call just fails. Under FEX (Wine for arm64 on Apple
+    // Silicon, issue #5) it wipes the emulator's record of which memory is
+    // executable: from then on every thread that reaches code FEX has not
+    // translated yet - the client's own .text included - faults, each fault nests
+    // until the thread's stack overflows, and the game freezes at login (first
+    // seen when a glyph was added to a block already in the arena: WriteBlockFile
+    // evicts the old block through here). FlushAll already had this order.
     block.Reset();
+    if (slotIndex != 0xFFFFFFFF) {
+        s_arena.FreeSlot(slotIndex);
+    }
     s_blockCache.erase(keyToErase);
 
     if (s_lastBlockIndex == blockIndex) {
@@ -181,20 +192,28 @@ FontHash MSDFManager::GetFontHash(uint32_t fontId) {
 }
 
 bool MSDFManager::LoadMappedBlock(const MSDFCache::BlockWrap& wrap, MappedBlock& outBlock, uint32_t slotIndex) {
+    // Every failure releases the slot - after closing whatever this call opened.
+    // A view it has already mapped is unmapped here, exactly once: FreeSlot must
+    // not unmap it while outBlock still holds it, or the next Reset() unmaps the
+    // same address again (see FreeBlock - under FEX that freezes the game).
+    auto Fail = [&]() {
+        outBlock.Close();
+        s_arena.FreeSlot(slotIndex);
+        return false;
+    };
+
     outBlock.file.handle = CreateFileW(wrap.path.native().c_str(),
         GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
     if (outBlock.file.handle == INVALID_HANDLE_VALUE) {
-        s_arena.FreeSlot(slotIndex);
-        return false;
+        return Fail();
     }
 
     LARGE_INTEGER fileSizeLI;
     if (!GetFileSizeEx(outBlock.file.handle, &fileSizeLI)) {
-        s_arena.FreeSlot(slotIndex);
-        return false;
+        return Fail();
     }
     outBlock.fileSize = static_cast<uint64_t>(fileSizeLI.QuadPart);
 
@@ -202,8 +221,7 @@ bool MSDFManager::LoadMappedBlock(const MSDFCache::BlockWrap& wrap, MappedBlock&
     uint64_t splitSize = ((outBlock.fileSize + allocGran - 1) / allocGran) * allocGran;
     if (splitSize < allocGran) splitSize = allocGran;
     if (splitSize > s_arena.SlotSize()) {
-        s_arena.FreeSlot(slotIndex);
-        return false;
+        return Fail();
     }
     outBlock.slotIndex = slotIndex;
 
@@ -211,23 +229,20 @@ bool MSDFManager::LoadMappedBlock(const MSDFCache::BlockWrap& wrap, MappedBlock&
     // the bytes this block actually needs.
     void* slotAddr = s_arena.ReserveSlot(slotIndex, static_cast<size_t>(splitSize));
     if (!slotAddr) {
-        s_arena.FreeSlot(slotIndex);
-        return false;
+        return Fail();
     }
 
     DWORD sizeHigh = static_cast<DWORD>(splitSize >> 32);
     DWORD sizeLow = static_cast<DWORD>(splitSize & 0xFFFFFFFF);
     outBlock.mapping.handle = CreateFileMappingW(outBlock.file.handle, nullptr, PAGE_READONLY, sizeHigh, sizeLow, nullptr);
     if (!outBlock.mapping.handle) {
-        s_arena.FreeSlot(slotIndex);
-        return false;
+        return Fail();
     }
 
     outBlock.view.ptr = MapViewOfFile3(outBlock.mapping.handle, nullptr, slotAddr, 0, splitSize,
         MEM_REPLACE_PLACEHOLDER, PAGE_READONLY, nullptr, 0);
     if (!outBlock.view.ptr) {
-        s_arena.FreeSlot(slotIndex);
-        return false;
+        return Fail();
     }
 
     outBlock.header = static_cast<const MSDFCache::BlockFileHeader*>(outBlock.view.ptr);
@@ -235,8 +250,7 @@ bool MSDFManager::LoadMappedBlock(const MSDFCache::BlockWrap& wrap, MappedBlock&
         outBlock.header->version != MSDFCache::CACHE_VERSION ||
         outBlock.header->blockId != wrap.key.blockId ||
         outBlock.header->entryCount > MSDFCache::BLOCK_SIZE) {
-        s_arena.FreeSlot(slotIndex);
-        return false;
+        return Fail();
     }
 
     outBlock.entryCount = outBlock.header->entryCount;
@@ -250,8 +264,7 @@ bool MSDFManager::LoadMappedBlock(const MSDFCache::BlockWrap& wrap, MappedBlock&
 
     size_t payloadOffset = hashTableOffset + (MSDFCache::BLOCK_SIZE * sizeof(uint32_t));
     if (outBlock.fileSize < payloadOffset) {
-        s_arena.FreeSlot(slotIndex);
-        return false;
+        return Fail();
     }
     outBlock.payload = static_cast<const uint8_t*>(outBlock.view.ptr) + payloadOffset;
 
@@ -260,8 +273,7 @@ bool MSDFManager::LoadMappedBlock(const MSDFCache::BlockWrap& wrap, MappedBlock&
         const MSDFCache::GlyphEntry& e = outBlock.entries[i];
         if (e.dataSize > 0) {
             if (e.dataOffset + e.dataSize > maxPayload) {
-                s_arena.FreeSlot(slotIndex);
-                return false;
+                return Fail();
             }
         }
     }
