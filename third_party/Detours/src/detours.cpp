@@ -1336,13 +1336,46 @@ const ULONG DETOUR_TRAMPOLINES_PER_REGION = (DETOUR_REGION_SIZE
 static PDETOUR_REGION s_pRegions = NULL;            // List of all regions.
 static PDETOUR_REGION s_pRegion = NULL;             // Default region.
 
+// [lexara112] Regions that could not be made writable again ("sealed").
+//
+// Under FEX (Wine for arm64 with FEX as the x86 emulator, on Apple Silicon)
+// VirtualAlloc'd memory that has once left PAGE_EXECUTE_READWRITE (for
+// PAGE_EXECUTE_READ, or even PAGE_READWRITE) refuses to go back to it with
+// ERROR_ACCESS_DENIED; image pages, such as the client's own code, don't.
+// Stock Detours then fails every
+// transaction after the first one. Instead, such a region is sealed: its
+// trampolines stay valid and executable, nothing new is placed in it, and the
+// next trampoline goes into a freshly allocated region. The list lives here, not
+// in the region header, because a sealed region can't be written.
+const ULONG DETOUR_MAX_SEALED_REGIONS = 256;
+static PDETOUR_REGION s_rpSealedRegions[DETOUR_MAX_SEALED_REGIONS];
+static ULONG s_nSealedRegions = 0;
+
+static BOOL detour_is_region_sealed(PDETOUR_REGION pRegion)
+{
+    for (ULONG i = 0; i < s_nSealedRegions; i++) {
+        if (s_rpSealedRegions[i] == pRegion) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static DWORD detour_writable_trampoline_regions()
 {
     // Mark all of the regions as writable.
     for (PDETOUR_REGION pRegion = s_pRegions; pRegion != NULL; pRegion = pRegion->pNext) {
+        if (detour_is_region_sealed(pRegion)) {
+            continue;
+        }
         DWORD dwOld;
         if (!VirtualProtect(pRegion, DETOUR_REGION_SIZE, PAGE_EXECUTE_READWRITE, &dwOld)) {
-            return GetLastError();
+            DWORD dwError = GetLastError();
+            if (s_nSealedRegions >= DETOUR_MAX_SEALED_REGIONS) {
+                return dwError;
+            }
+            DETOUR_TRACE(("Region %p can't be made writable (%lu), sealing it\n", pRegion, dwError));
+            s_rpSealedRegions[s_nSealedRegions++] = pRegion;
         }
     }
     return NO_ERROR;
@@ -1354,6 +1387,9 @@ static void detour_runnable_trampoline_regions()
 
     // Mark all of the regions as executable.
     for (PDETOUR_REGION pRegion = s_pRegions; pRegion != NULL; pRegion = pRegion->pNext) {
+        if (detour_is_region_sealed(pRegion)) {
+            continue;
+        }
         DWORD dwOld;
         VirtualProtect(pRegion, DETOUR_REGION_SIZE, PAGE_EXECUTE_READ, &dwOld);
         FlushInstructionCache(hProcess, pRegion, DETOUR_REGION_SIZE);
@@ -1629,6 +1665,11 @@ static PDETOUR_TRAMPOLINE detour_alloc_trampoline(PBYTE pbTarget, BOOL fEcCode)
     }
 #endif
 
+    // [lexara112] A sealed region can't be written: never place a trampoline there.
+    if (s_pRegion != NULL && detour_is_region_sealed(s_pRegion)) {
+        s_pRegion = NULL;
+    }
+
     // First check the default region for an valid free block.
     if (s_pRegion != NULL && s_pRegion->pFree != NULL &&
         s_pRegion->pFree >= pLo && s_pRegion->pFree <= pHi) {
@@ -1647,6 +1688,7 @@ static PDETOUR_TRAMPOLINE detour_alloc_trampoline(PBYTE pbTarget, BOOL fEcCode)
     // Then check the existing regions for a valid free block.
     for (s_pRegion = s_pRegions; s_pRegion != NULL; s_pRegion = s_pRegion->pNext) {
         if (s_pRegion != NULL && s_pRegion->pFree != NULL &&
+            !detour_is_region_sealed(s_pRegion) &&
 #ifdef _M_ARM64EC
             s_pRegion->fEcCode == fEcCode &&
 #endif
@@ -1695,6 +1737,12 @@ static void detour_free_trampoline(PDETOUR_TRAMPOLINE pTrampoline)
     PDETOUR_REGION pRegion = (PDETOUR_REGION)
         ((ULONG_PTR)pTrampoline & ~(ULONG_PTR)0xffff);
 
+    // [lexara112] A sealed region is read-only: the trampoline is leaked, not
+    // returned to its free list.
+    if (detour_is_region_sealed(pRegion)) {
+        return;
+    }
+
     memset(pTrampoline, 0, sizeof(*pTrampoline));
     pTrampoline->pbRemain = (PBYTE)pRegion->pFree;
     pRegion->pFree = pTrampoline;
@@ -1729,14 +1777,23 @@ static void detour_free_unused_trampoline_regions()
     PDETOUR_REGION *ppRegionBase = &s_pRegions;
     PDETOUR_REGION pRegion = s_pRegions;
 
+    PDETOUR_REGION pPrevious = NULL;
+
     while (pRegion != NULL) {
-        if (detour_is_region_empty(pRegion)) {
+        // [lexara112] Never release a sealed region: its address stays on the
+        // sealed list, and a new region allocated there would be taken as sealed.
+        // Nor one whose predecessor is sealed: unlinking it writes that
+        // predecessor's pNext, which can't be written.
+        if (!detour_is_region_sealed(pRegion) &&
+            (pPrevious == NULL || !detour_is_region_sealed(pPrevious)) &&
+            detour_is_region_empty(pRegion)) {
             *ppRegionBase = pRegion->pNext;
 
             VirtualFree(pRegion, 0, MEM_RELEASE);
             s_pRegion = NULL;
         }
         else {
+            pPrevious = pRegion;
             ppRegionBase = &pRegion->pNext;
         }
         pRegion = *ppRegionBase;

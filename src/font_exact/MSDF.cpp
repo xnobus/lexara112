@@ -1195,6 +1195,9 @@ namespace {
         FreeType::AddDefaultModulesFn(library);
     }
 
+    // Set when the transaction in FreeType_InitHk did not commit.
+    bool s_ftHooksFailed = false;
+
     // [1.12] All FreeType hooks are __fastcall: the client calls them through
     // registers (ecx, edx, the rest on the stack). Argument order is unchanged from
     // 3.3.5. For this function the wrapper at 005C17F0 confirms it outright:
@@ -1211,8 +1214,14 @@ namespace {
 
             if (MSDF::IS_CJK) return FreeType::InitFn(memory, alibrary);
 
-            DetourTransactionBegin();
-            DetourUpdateThread(GetCurrentThread());
+            // [1.12] Every status in this transaction is checked. If it doesn't
+            // commit, none of the hooks below are placed - FT_Add_Default_Modules
+            // included - and handing the client our library would crash it at
+            // 007CECA4 (issue #5: under FEX, Detours could not reopen its
+            // trampoline region, and every transaction after the first failed).
+            // The client then gets its own FreeType and draws its own text.
+            const LONG ftBegin = DetourTransactionBegin();
+            const LONG ftUpdate = (ftBegin == NO_ERROR) ? DetourUpdateThread(GetCurrentThread()) : ftBegin;
             // AddDefaultModules goes hand in hand with the Init hook - and that one
             // is gated higher up, in MSDF::initialize(), so by this point we are
             // only ever here with ft_hooks=1. Without this hook the client crashes
@@ -1246,7 +1255,20 @@ namespace {
             if (CfgOn("hook_checkgeom")) Hooks::Detour(&CGxString::CheckGeometryFn, CGxString__CheckGeometryHk);
             if (CfgOn("hook_writegeom")) Hooks::Detour(&CGxString::WriteGeometryFn, CGxString__WriteGeometryHk);
             if (CfgOn("hook_initline")) Hooks::Detour(&CGxString::InitializeTextLineFn, CGxString__InitializeTextLineHk);
-            DetourTransactionCommit();
+            LONG ftCommit = ftBegin;
+            if (ftBegin == NO_ERROR) {
+                // Commit returns the first error any DetourAttach above left
+                // pending, and then aborts the transaction itself.
+                ftCommit = DetourTransactionCommit();
+            }
+            if (ftBegin != NO_ERROR || ftUpdate != NO_ERROR || ftCommit != NO_ERROR) {
+                Log("[MSDF] FreeType hooks NOT placed: begin=%ld update=%ld commit=%ld"
+                    " - the client keeps its own FreeType, MSDF renderer off", ftBegin, ftUpdate, ftCommit);
+                s_ftHooksFailed = true;  // every later Init call passes straight through
+                MSDF::ENABLED = false;
+                return FreeType::InitFn(memory, alibrary);
+            }
+            Log("[MSDF] FreeType hooks placed");
 
             D3D::RegisterOnDestroy([]() {
                 if (s_cachedPS) { s_cachedPS->Release(); s_cachedPS = nullptr; }
@@ -1265,7 +1287,7 @@ namespace {
             s_prefetchPayload.reserve(16383);
             CGxDevice::InitFontIndexBufferFn();
         }
-        else if (MSDF::IS_CJK) {
+        else if (MSDF::IS_CJK || s_ftHooksFailed) {
             return FreeType::InitFn(memory, alibrary);
         }
         if (const FT_Error error = FT_Init_FreeType(&MSDF::g_realFtLibrary)) return error;
