@@ -41,16 +41,24 @@ void Log(const char* fmt, ...) {
 
     va_list a;
     va_start(a, fmt);
-    const int body = _vsnprintf_s(line + len, sizeof(line) - len - 1, _TRUNCATE, fmt, a);
+    const int body = _vsnprintf_s(line + len, sizeof(line) - len - 2, _TRUNCATE, fmt, a);
     va_end(a);
     len = body < 0 ? static_cast<int>(strlen(line)) : len + body;
+    line[len++] = '\r';
     line[len++] = '\n';
-    line[len] = 0;
 
-    FILE* f = nullptr;
-    if (fopen_s(&f, path, "a") != 0 || !f) return;
-    fputs(line, f);
-    fclose(f);
+    // [1.12] FILE_APPEND_DATA, not fopen(..., "a"): the CRT's append mode seeks to
+    // the end and then writes, so two threads logging in the same millisecond wrote
+    // at the same offset and one line overwrote the other. That is how
+    // "device hooks: commit=..." and the vtbl[16] guard's exit line took turns
+    // vanishing (issue #5, and the reporter's log) although both had run. A
+    // system-level append is atomic per write, across processes too.
+    HANDLE f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(f, line, static_cast<DWORD>(len), &written, nullptr);
+    CloseHandle(f);
 }
 
 bool FontExact_OnAttach();
